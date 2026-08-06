@@ -1,17 +1,18 @@
-from dotenv import load_dotenv
-import os
-
-# .env dosyasını yükle
-load_dotenv()
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Settings:
-    APP_NAME = "StudyFlow AI"
-    APP_VERSION = "1.0.0"
+class Settings(BaseSettings):
+    APP_NAME: str = "StudyFlow AI"
+    APP_VERSION: str = "1.0.0"
 
-    DATABASE_URL = os.getenv("DATABASE_URL")
-    SECRET_KEY = os.getenv("SECRET_KEY")
-    CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+    DATABASE_URL: str
+    SECRET_KEY: str
+    CLAUDE_API_KEY: str = ""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+    )
 
 
 settings = Settings()
