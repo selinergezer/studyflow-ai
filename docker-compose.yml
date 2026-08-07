@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17
+
+    container_name: studyflow-postgres
+
+    restart: always
+
+    environment:
+      POSTGRES_USER: studyflow
+      POSTGRES_PASSWORD: studyflow123
+      POSTGRES_DB: studyflow_db
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
