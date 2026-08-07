@@ -86,3 +86,24 @@ Henüz yok.
 - JWT Authentication tamamlandı.
 - PostgreSQL Docker üzerinden çalışıyor.
 - Swagger üzerinden tüm Authentication testleri başarıyla tamamlandı.
+
+## 2026-08-07
+
+### PDF Processing
+
+- ✅ PDF upload endpoint completed
+- ✅ PDF files are stored on the server
+- ✅ PyMuPDF integration completed
+- ✅ Extracted text is stored in PostgreSQL
+- ✅ Page count is stored
+- ✅ Document model updated with text, summary and page_count fields
+
+### Backend Status
+
+Current workflow:
+
+User
+→ Create Course
+→ Upload PDF
+→ Extract Text
+→ Save Document
