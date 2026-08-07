@@ -6,6 +6,8 @@ from app.db.database import Base
 
 from sqlalchemy import Text
 
+from app.services.ai_service import generate_summary
+
 
 class Document(Base):
     __tablename__ = "documents"

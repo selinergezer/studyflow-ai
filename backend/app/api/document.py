@@ -11,6 +11,7 @@ from app.models.user import User
 from app.core.security import get_current_user
 
 from app.services.pdf_service import extract_text_from_pdf
+from app.services.ai_service import generate_summary
 
 router = APIRouter(
     prefix="/documents",
@@ -48,12 +49,14 @@ def upload_document(
 
     text, page_count = extract_text_from_pdf(file_path)
 
+    summary = generate_summary(text)
+
     new_document = Document(
     filename=file.filename,
     file_path=file_path,
     text=text,
+    summary=summary,
     page_count=page_count,
-    summary=None,
     course_id=course_id
     )
 
@@ -62,7 +65,9 @@ def upload_document(
     db.refresh(new_document)
 
     return {
-        "message": "PDF başarıyla yüklendi.",
-        "document_id": new_document.id,
-        "filename": new_document.filename
-    }
+    "message": "PDF başarıyla yüklendi.",
+    "document_id": new_document.id,
+    "filename": new_document.filename,
+    "page_count": new_document.page_count,
+    "summary": new_document.summary
+}
