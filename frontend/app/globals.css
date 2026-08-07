@@ -1,26 +1,99 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #fafafa;
+  --foreground: #111827;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-inter);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--background);
+}
+
+html.dark {
+  color-scheme: dark;
+  --background: #111827;
+  --foreground: #f3f4f6;
 }
 
 body {
+  min-height: 100vh;
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-inter), Arial, Helvetica, sans-serif;
+}
+
+/* Central dark-theme mapping for the shared StudyFlow surface palette. */
+.dark .bg-neutral-50 { background-color: #111827; }
+.dark .bg-white { background-color: #1f2937; }
+.dark .bg-gray-50,
+.dark .bg-gray-50\/50 { background-color: #18212f; }
+.dark .bg-gray-100 { background-color: #273244; }
+.dark .bg-gray-200 { background-color: #374151; }
+.dark .text-gray-950,
+.dark .text-gray-900 { color: #f3f4f6; }
+.dark .text-gray-800,
+.dark .text-gray-700 { color: #d1d5db; }
+.dark .text-gray-600,
+.dark .text-gray-500 { color: #9ca3af; }
+.dark .text-gray-400 { color: #6b7280; }
+.dark .border-gray-100,
+.dark .border-gray-200,
+.dark .border-gray-200\/80,
+.dark .border-gray-300 { border-color: #374151; }
+.dark .divide-gray-100 > :not(:last-child) { border-color: #374151; }
+.dark .ring-gray-200,
+.dark .ring-gray-200\/80,
+.dark .ring-gray-300 { --tw-ring-color: #374151; }
+.dark .hover\:bg-gray-50:hover { background-color: #273244; }
+.dark .hover\:bg-gray-100:hover { background-color: #374151; }
+.dark .hover\:bg-gray-200:hover { background-color: #4b5563; }
+.dark .hover\:text-gray-900:hover { color: #f3f4f6; }
+.dark .placeholder\:text-gray-400::placeholder { color: #6b7280; }
+.dark .bg-red-50 { background-color: rgb(127 29 29 / 0.22); }
+.dark .bg-green-50 { background-color: rgb(20 83 45 / 0.28); }
+.dark .bg-blue-50 { background-color: rgb(30 64 175 / 0.22); }
+
+button,
+a,
+input,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-enter {
+  animation: enter 500ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
