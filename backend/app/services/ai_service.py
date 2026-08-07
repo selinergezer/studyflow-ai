@@ -1,13 +1,16 @@
-from anthropic import Anthropic
-
+from google import genai
 from app.core.config import settings
 
-client = Anthropic(
-    api_key=settings.ANTHROPIC_API_KEY
-)
+client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
+print("========== AVAILABLE MODELS ==========")
+for model in client.models.list():
+    print(model.name)
+print("======================================")
 
 def generate_summary(text: str):
+
+    print("AAAAAAAAAAAA")
 
     prompt = f"""
 Aşağıdaki ders notunu Türkçe özetle.
@@ -22,16 +25,12 @@ Ders Notu:
 {text[:15000]}
 """
 
-    response = client.messages.create(
-        model="claude-3-5-haiku-latest",
-        max_tokens=700,
-        temperature=0.2,
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-    )
+    print("MODEL TEST")
+    print("Using model: gemini-2.5-flash")
 
-    return response.content[0].text
+    response = client.models.generate_content(
+    model="models/gemini-2.5-flash",
+    contents=prompt,
+)
+
+    return response.text
