@@ -11,6 +11,7 @@ from app.models.course import Course
 from app.models.document import Document
 from app.models.quiz import Quiz
 from app.models.question import Question
+from app.models.flashcard import Flashcard
 
 # =========================
 # API ROUTERLARI
@@ -20,6 +21,7 @@ from app.api.user import router as user_router
 from app.api.course import router as course_router
 from app.api.document import router as document_router
 from app.api.quiz import router as quiz_router
+from app.api.flashcard import router as flashcard_router
 
 from app.models.quiz_attempt import QuizAttempt
 
@@ -46,6 +48,7 @@ app.include_router(user_router)
 app.include_router(course_router)
 app.include_router(document_router)
 app.include_router(quiz_router)
+app.include_router(flashcard_router)
 
 
 @app.get("/")

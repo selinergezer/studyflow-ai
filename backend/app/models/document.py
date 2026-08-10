@@ -40,3 +40,9 @@ class Document(Base):
         back_populates="document",
         cascade="all, delete"
     )
+
+    flashcards = relationship(
+    "Flashcard",
+    back_populates="document",
+    cascade="all, delete"
+    ) 

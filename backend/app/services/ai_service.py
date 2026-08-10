@@ -132,3 +132,49 @@ if __name__ == "__main__":
         print("D:", question.option_d)
         print("Cevap:", question.correct_answer)
         print("Açıklama:", question.explanation)
+
+# =========================================================
+# AI FLASHCARD OLUŞTURMA
+# =========================================================
+
+class FlashcardItem(BaseModel):
+    question: str
+    answer: str
+
+
+class FlashcardResponse(BaseModel):
+    flashcards: list[FlashcardItem]
+
+
+def generate_flashcards(text: str, flashcard_count: int = 10):
+
+    prompt = f"""
+Aşağıdaki ders notuna göre {flashcard_count} adet flashcard oluştur.
+
+Kurallar:
+
+- Sorular yalnızca verilen ders notundaki bilgilere dayanmalı.
+- Bilgi uydurma.
+- Her soru farklı bir kavramı veya önemli bilgiyi ölçmeli.
+- Sorular kısa ve anlaşılır olmalı.
+- Cevaplar kısa ama yeterince açıklayıcı olmalı.
+- Türkçe yaz.
+- Flashcard'lar sınava hazırlanmak için kullanılabilecek nitelikte olmalı.
+- Gereksiz ayrıntılardan kaçın.
+- Aynı bilgiyi tekrar eden kartlar oluşturma.
+
+Ders Notu:
+
+{text[:30000]}
+"""
+
+    response = client.models.generate_content(
+        model="gemini-3.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=FlashcardResponse,
+        ),
+    )
+
+    return response.parsed

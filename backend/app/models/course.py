@@ -35,3 +35,9 @@ class Course(Base):
         back_populates="course",
         cascade="all, delete"
     )
+
+    flashcards = relationship(
+    "Flashcard",
+    back_populates="course",
+    cascade="all, delete"
+   )
