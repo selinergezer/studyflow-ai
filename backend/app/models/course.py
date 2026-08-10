@@ -7,11 +7,20 @@ from app.db.database import Base
 class Course(Base):
     __tablename__ = "courses"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True
+    )
 
-    name = Column(String, nullable=False)
+    name = Column(
+        String,
+        nullable=False
+    )
 
-    description = Column(String)
+    description = Column(
+        String
+    )
 
     user_id = Column(
         Integer,
@@ -37,7 +46,13 @@ class Course(Base):
     )
 
     flashcards = relationship(
-    "Flashcard",
-    back_populates="course",
-    cascade="all, delete"
-   )
+        "Flashcard",
+        back_populates="course",
+        cascade="all, delete"
+    )
+
+    goals = relationship(
+        "Goal",
+        back_populates="course",
+        cascade="all, delete"
+    )

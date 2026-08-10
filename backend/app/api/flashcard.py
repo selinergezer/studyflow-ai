@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 from app.schemas.flashcard import FlashcardReview
 
+from app.services.goal_service import update_goal_progress
+
 
 router = APIRouter(
     prefix="/flashcards",
@@ -326,7 +328,18 @@ def review_flashcard(
         )
 
     db.commit()
+
+# Flashcard tekrar hedefinin ilerlemesini güncelle
+    update_goal_progress(
+        db=db,
+        user_id=current_user.id,
+        goal_type="flashcard_count",
+        amount=1
+    )
+
     db.refresh(flashcard)
+
+
 
     return {
         "message": "Flashcard değerlendirmesi kaydedildi.",

@@ -14,6 +14,8 @@ from app.services.ai_service import generate_quiz
 from app.schemas.quiz import QuizSubmit
 from app.models.quiz_attempt import QuizAttempt
 
+from app.services.goal_service import update_goal_progress
+
 router = APIRouter(
     prefix="/quizzes",
     tags=["Quizzes"]
@@ -263,6 +265,13 @@ def submit_quiz(
     db.add(attempt)
     db.commit()
     db.refresh(attempt)
+
+    update_goal_progress(
+        db=db,
+        user_id=current_user.id,
+        goal_type="quiz_count",
+        amount=1
+    )
 
     return {
     "message": "Quiz başarıyla tamamlandı.",

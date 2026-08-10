@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from app.db.database import Base, engine
 
+
 # =========================
 # MODELLER
 # =========================
@@ -12,6 +13,9 @@ from app.models.document import Document
 from app.models.quiz import Quiz
 from app.models.question import Question
 from app.models.flashcard import Flashcard
+from app.models.quiz_attempt import QuizAttempt
+from app.models.goal import Goal
+
 
 # =========================
 # API ROUTERLARI
@@ -22,14 +26,16 @@ from app.api.course import router as course_router
 from app.api.document import router as document_router
 from app.api.quiz import router as quiz_router
 from app.api.flashcard import router as flashcard_router
+from app.api.stats import router as stats_router
+from app.api.goal import router as goal_router
 
-from app.models.quiz_attempt import QuizAttempt
 
 # =========================
 # DATABASE
 # =========================
 
 Base.metadata.create_all(bind=engine)
+
 
 # =========================
 # FASTAPI
@@ -40,6 +46,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
 # =========================
 # ROUTERLAR
 # =========================
@@ -49,7 +56,8 @@ app.include_router(course_router)
 app.include_router(document_router)
 app.include_router(quiz_router)
 app.include_router(flashcard_router)
-
+app.include_router(stats_router)
+app.include_router(goal_router)
 
 @app.get("/")
 def root():
