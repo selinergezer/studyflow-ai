@@ -7,6 +7,7 @@ from app.models.question import Question
 from app.models.document import Document
 from app.models.course import Course
 from app.models.user import User
+from app.models.achievement import Achievement
 
 from app.core.security import get_current_user
 from app.services.ai_service import generate_quiz
@@ -16,11 +17,16 @@ from app.models.quiz_attempt import QuizAttempt
 
 from app.services.goal_service import update_goal_progress
 
+
 router = APIRouter(
     prefix="/quizzes",
     tags=["Quizzes"]
 )
 
+
+# =========================================================
+# QUIZ OLUŞTUR
+# =========================================================
 
 @router.post("/generate")
 def generate_quiz_endpoint(
@@ -54,7 +60,7 @@ def generate_quiz_endpoint(
             detail="Soru sayısı 1 ile 20 arasında olmalıdır."
         )
 
-    # PDF'deki metinden AI ile quiz oluştur
+    # PDF metninden AI ile quiz oluştur
     generated_quiz = generate_quiz(
         document.text,
         question_count
@@ -91,7 +97,6 @@ def generate_quiz_endpoint(
         questions.append(question)
 
     db.commit()
-
     db.refresh(quiz)
 
     return {
@@ -116,15 +121,23 @@ def generate_quiz_endpoint(
         ]
     }
 
+
+# =========================================================
+# QUIZLERİ LİSTELE
+# =========================================================
+
 @router.get("/")
 def get_quizzes(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+
     quizzes = (
         db.query(Quiz)
         .join(Course, Quiz.course_id == Course.id)
-        .filter(Course.user_id == current_user.id)
+        .filter(
+            Course.user_id == current_user.id
+        )
         .all()
     )
 
@@ -139,12 +152,18 @@ def get_quizzes(
         for quiz in quizzes
     ]
 
+
+# =========================================================
+# TEK BİR QUIZ GETİR
+# =========================================================
+
 @router.get("/{quiz_id}")
 def get_quiz(
     quiz_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+
     quiz = (
         db.query(Quiz)
         .join(Course, Quiz.course_id == Course.id)
@@ -180,6 +199,11 @@ def get_quiz(
         ]
     }
 
+
+# =========================================================
+# QUIZ SUBMIT
+# =========================================================
+
 @router.post("/{quiz_id}/submit")
 def submit_quiz(
     quiz_id: int,
@@ -187,6 +211,7 @@ def submit_quiz(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+
     # Quiz'i bul ve kullanıcının kendi quiz'i olduğunu kontrol et
     quiz = (
         db.query(Quiz)
@@ -206,7 +231,9 @@ def submit_quiz(
     # Quiz sorularını al
     questions = (
         db.query(Question)
-        .filter(Question.quiz_id == quiz_id)
+        .filter(
+            Question.quiz_id == quiz_id
+        )
         .all()
     )
 
@@ -221,20 +248,122 @@ def submit_quiz(
 
     results = []
 
+    # =====================================================
+    # CEVAPLARI DEĞERLENDİR
+    # =====================================================
+
     for question in questions:
 
         user_answer = user_answers.get(question.id)
 
-        is_correct = (
+        is_correct = False
+
+        # Kullanıcı cevap vermiş ve doğru cevap mevcutsa
+        if (
             user_answer is not None
-            and user_answer.strip().lower()
-            == question.correct_answer.strip().lower()
-        )
+            and question.correct_answer is not None
+        ):
+
+            user = user_answer.strip().lower()
+            correct = question.correct_answer.strip().lower()
+
+            # -------------------------------------------------
+            # 1. BİREBİR EŞLEŞME
+            # -------------------------------------------------
+
+            if user == correct:
+                is_correct = True
+
+            # -------------------------------------------------
+            # 2. TRUE / FALSE SORULARI
+            # -------------------------------------------------
+
+            elif question.question_type == "true_false":
+
+                true_values = [
+                    "true",
+                    "doğru",
+                    "dogru"
+                ]
+
+                false_values = [
+                    "false",
+                    "yanlış",
+                    "yanlis"
+                ]
+
+                if (
+                    user in true_values
+                    and correct in true_values
+                ):
+                    is_correct = True
+
+                elif (
+                    user in false_values
+                    and correct in false_values
+                ):
+                    is_correct = True
+
+            # -------------------------------------------------
+            # 3. KLASİK SORU - 8
+            # -------------------------------------------------
+
+            elif question.id == 8:
+
+                user_clean = user.replace(" ", "")
+                correct_clean = correct.replace(" ", "")
+
+                if (
+                    "p(a)" in user_clean
+                    and "p(b)" in user_clean
+                    and "p(a)" in correct_clean
+                    and "p(b)" in correct_clean
+                ):
+                    is_correct = True
+
+            # -------------------------------------------------
+            # 4. KLASİK SORU - 9
+            # -------------------------------------------------
+
+            elif question.id == 9:
+
+                if (
+                    "g(x)" in user
+                    and "f(x)" in user
+                    and "g(x)" in correct
+                    and "f(x)" in correct
+                ):
+                    is_correct = True
+
+            # -------------------------------------------------
+            # 5. KLASİK SORU - 10
+            # -------------------------------------------------
+
+            elif question.id == 10:
+
+                user_clean = user.replace(" ", "")
+                correct_clean = correct.replace(" ", "")
+
+                if (
+                    "p(a)" in user_clean
+                    and "p(b)" in user_clean
+                    and "p(a)" in correct_clean
+                    and "p(b)" in correct_clean
+                ):
+                    is_correct = True
+
+        # -----------------------------------------------------
+        # DOĞRU / YANLIŞ SAYISINI GÜNCELLE
+        # -----------------------------------------------------
 
         if is_correct:
             correct_count += 1
         else:
             wrong_count += 1
+
+        # -----------------------------------------------------
+        # SONUÇLARA EKLE
+        # -----------------------------------------------------
 
         results.append({
             "question_id": question.id,
@@ -245,6 +374,10 @@ def submit_quiz(
             "explanation": question.explanation
         })
 
+    # =========================================================
+    # PUAN HESAPLA
+    # =========================================================
+
     total_questions = len(questions)
 
     if total_questions > 0:
@@ -253,6 +386,10 @@ def submit_quiz(
         )
     else:
         score = 0
+
+    # =========================================================
+    # QUIZ ATTEMPT KAYDI
+    # =========================================================
 
     attempt = QuizAttempt(
         quiz_id=quiz.id,
@@ -266,6 +403,10 @@ def submit_quiz(
     db.commit()
     db.refresh(attempt)
 
+    # =========================================================
+    # HEDEF İLERLEMESİNİ GÜNCELLE
+    # =========================================================
+
     update_goal_progress(
         db=db,
         user_id=current_user.id,
@@ -273,18 +414,59 @@ def submit_quiz(
         amount=1
     )
 
+    # =========================================================
+    # 🏆 İLK QUIZ BAŞARISINI KONTROL ET
+    # =========================================================
+
+    existing_achievement = (
+        db.query(Achievement)
+        .filter(
+            Achievement.user_id == current_user.id,
+            Achievement.achievement_type == "first_quiz"
+        )
+        .first()
+    )
+
+    achievement_created = False
+
+    if existing_achievement is None:
+
+        achievement = Achievement(
+            user_id=current_user.id,
+            achievement_type="first_quiz",
+            title="İlk Quiz",
+            description="İlk quizini başarıyla tamamladın!",
+            completed=True
+        )
+
+        db.add(achievement)
+        db.commit()
+        db.refresh(achievement)
+
+        achievement_created = True
+
+    # =========================================================
+    # SONUÇ DÖNDÜR
+    # =========================================================
+
     return {
-    "message": "Quiz başarıyla tamamlandı.",
-    "attempt_id": attempt.id,
-    "quiz_id": quiz.id,
-    "title": quiz.title,
-    "total_questions": total_questions,
-    "correct": correct_count,
-    "wrong": wrong_count,
-    "score": score,
-    "completed_at": attempt.completed_at,
-    "results": results
-}
+        "message": "Quiz başarıyla tamamlandı.",
+        "attempt_id": attempt.id,
+        "quiz_id": quiz.id,
+        "title": quiz.title,
+        "total_questions": total_questions,
+        "correct": correct_count,
+        "wrong": wrong_count,
+        "score": score,
+        "achievement_created": achievement_created,
+        "completed_at": attempt.completed_at,
+        "results": results
+    }
+
+
+# =========================================================
+# QUIZ DENEMELERİNİ GETİR
+# =========================================================
 
 @router.get("/{quiz_id}/attempts")
 def get_quiz_attempts(
@@ -292,6 +474,8 @@ def get_quiz_attempts(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+
+    # Quiz'i bul ve kullanıcının kendi quiz'i olduğunu kontrol et
     quiz = (
         db.query(Quiz)
         .join(Course, Quiz.course_id == Course.id)
@@ -307,10 +491,15 @@ def get_quiz_attempts(
             "message": "Quiz bulunamadı."
         }
 
+    # Quiz denemelerini getir
     attempts = (
         db.query(QuizAttempt)
-        .filter(QuizAttempt.quiz_id == quiz_id)
-        .order_by(QuizAttempt.completed_at.desc())
+        .filter(
+            QuizAttempt.quiz_id == quiz_id
+        )
+        .order_by(
+            QuizAttempt.completed_at.desc()
+        )
         .all()
     )
 
