@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useSyncExternalStore } from "react";
+import { useRouter } from "next/navigation";
 import Button from "@/components/ui/Button";
 import { useLanguage } from "@/providers/LanguageProvider";
 import type { TranslationKey } from "@/lib/translations";
@@ -82,6 +83,7 @@ const modalContent: Record<Exclude<Modal, null>, { title: TranslationKey; descri
 };
 
 export default function SettingsView() {
+  const router = useRouter();
   const [theme, setTheme] = useTheme();
   const { language, setLanguage, t } = useLanguage();
   const [studyReminders, setStudyReminders] = useState(true);
@@ -92,6 +94,11 @@ export default function SettingsView() {
   function confirmModal() {
     if (modal === "history" || modal === "materials") setNotice(t("requestConfirmed"));
     setModal(null);
+  }
+
+  function logout() {
+    localStorage.removeItem("access_token");
+    router.push("/login");
   }
 
   return (
@@ -114,6 +121,9 @@ export default function SettingsView() {
           </SettingRow>
           <SettingRow title={t("connectAccount")} description={t("connectDesc")}>
             <Button onClick={() => setModal("connect")}>{t("createAccountLogin")}</Button>
+          </SettingRow>
+          <SettingRow title={language === "tr" ? "Oturumu kapat" : "Sign out"} description={language === "tr" ? "Bu cihazdaki mevcut oturumunuzu kapatın." : "End your current session on this device."}>
+            <Button variant="secondary" onClick={logout}>{language === "tr" ? "Çıkış Yap" : "Sign Out"}</Button>
           </SettingRow>
         </SettingsSection>
 

@@ -1,10 +1,18 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import { useLanguage } from "@/providers/LanguageProvider";
+import { apiFetch, type Course } from "@/lib/api";
+
+type UploadResponse = {
+  document_id: number;
+  filename: string;
+  page_count: number;
+  summary: string;
+};
 
 function formatBytes(bytes: number) {
   if (bytes === 0) return "0 KB";
@@ -18,7 +26,14 @@ export default function PdfUploader() {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [courseId, setCourseId] = useState("");
   const { t } = useLanguage();
+
+  useEffect(() => {
+    apiFetch<Course[]>("/courses/").then((result) => { setCourses(result); if (result[0]) setCourseId(String(result[0].id)); }).catch((cause) => { console.error(cause); setError(cause instanceof Error ? cause.message : "İşlem sırasında bir hata oluştu."); });
+  }, []);
 
   function selectFile(candidate?: File) {
     if (!candidate) return;
@@ -46,10 +61,22 @@ export default function PdfUploader() {
     if (inputRef.current) inputRef.current.value = "";
   }
 
-  function analyzePdf() {
-    if (!file) return;
-    // Backend integration point: upload the file, then navigate using the returned document id.
-    router.push("/documents/1");
+  async function analyzePdf() {
+    if (!file || !courseId) return;
+    setIsAnalyzing(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const document = await apiFetch<UploadResponse>(`/documents/upload?course_id=${courseId}`, { method: "POST", body: formData });
+      localStorage.setItem("lastDocument", JSON.stringify({ ...document, course_id: Number(courseId) }));
+      router.push(`/documents/${document.document_id}`);
+    } catch (cause) {
+      console.error(cause);
+      setError(cause instanceof Error ? cause.message : "PDF analiz edilirken bir hata oluştu.");
+      setIsAnalyzing(false);
+    }
   }
 
   return (
@@ -61,6 +88,8 @@ export default function PdfUploader() {
       </div>
 
       <Card className="animate-enter mt-10 p-5 [animation-delay:60ms] sm:p-8">
+        <label htmlFor="upload-course" className="mb-2 block text-sm font-medium text-gray-800">{t("courses")}</label>
+        <select id="upload-course" value={courseId} onChange={(event) => setCourseId(event.target.value)} className="mb-6 h-11 w-full rounded-xl border border-gray-200 bg-white px-3.5 text-sm text-gray-900 outline-none focus:border-blue-600" required><option value="">Kurs seçin</option>{courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select>
         <input ref={inputRef} type="file" accept="application/pdf,.pdf" className="sr-only" onChange={handleInput} aria-label={t("choosePdfFile")} />
 
         {!file ? (
@@ -89,7 +118,7 @@ export default function PdfUploader() {
                 <p className="truncate text-sm font-medium text-gray-950">{file.name}</p>
                 <p className="mt-1 text-xs text-gray-500">{formatBytes(file.size)} · {t("pdfDocument")}</p>
               </div>
-              <button type="button" onClick={removeFile} className="flex size-9 shrink-0 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-200 hover:text-gray-700 focus-visible:outline-2 focus-visible:outline-blue-600" aria-label={t("removeFile", { name: file.name })}>
+              <button type="button" onClick={removeFile} disabled={isAnalyzing} className="flex size-9 shrink-0 items-center justify-center rounded-lg text-gray-400 transition hover:bg-gray-200 hover:text-gray-700 focus-visible:outline-2 focus-visible:outline-blue-600" aria-label={t("removeFile", { name: file.name })}>
                 <svg className="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="m6 6 12 12M18 6 6 18" /></svg>
               </button>
             </div>
@@ -100,8 +129,8 @@ export default function PdfUploader() {
         {error ? <p className="mt-3 text-sm text-red-600" role="alert">{error}</p> : null}
 
         <div className="mt-6 flex justify-end">
-          <Button onClick={analyzePdf} disabled={!file} className="w-full sm:w-auto">
-            {t("analyzeButton")}
+          <Button onClick={analyzePdf} disabled={!file || !courseId || isAnalyzing} className="w-full sm:w-auto">
+            {isAnalyzing ? "PDF analiz ediliyor..." : t("analyzeButton")}
             <svg className="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M5 12h14m-5-5 5 5-5 5" /></svg>
           </Button>
         </div>

@@ -1,8 +1,8 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Logo from "@/components/shared/Logo";
 import { useLanguage } from "@/providers/LanguageProvider";
 
@@ -12,7 +12,25 @@ const navigation = [
 
 export default function WorkspaceShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
   const { t } = useLanguage();
+
+  useEffect(() => {
+    function handleExpiredSession() {
+      setIsAuthenticated(false);
+      router.replace("/login");
+    }
+    window.addEventListener("studyflow-auth-expired", handleExpiredSession);
+    queueMicrotask(() => {
+      const hasToken = Boolean(localStorage.getItem("access_token"));
+      setIsAuthenticated(hasToken);
+      setAuthChecked(true);
+      if (!hasToken) router.replace("/login");
+    });
+    return () => window.removeEventListener("studyflow-auth-expired", handleExpiredSession);
+  }, [router]);
 
   function isActive(href: string) {
     if (href === "/library") {
@@ -20,6 +38,10 @@ export default function WorkspaceShell({ children }: { children: ReactNode }) {
     }
     if (href === "/courses") return pathname === href || pathname.startsWith("/courses/");
     return pathname === href;
+  }
+
+  if (!authChecked || !isAuthenticated) {
+    return <main className="min-h-screen bg-neutral-50" />;
   }
 
   return (
@@ -42,7 +64,7 @@ export default function WorkspaceShell({ children }: { children: ReactNode }) {
               );
             })}
           </nav>
-          <Link href="/settings" className="flex size-9 shrink-0 items-center justify-center rounded-full bg-gray-900 text-xs font-medium text-white transition hover:bg-gray-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600" aria-label={t("openSettings")}>
+          <Link href={isAuthenticated ? "/settings" : "/login"} className="flex size-9 shrink-0 items-center justify-center rounded-full bg-gray-900 text-xs font-medium text-white transition hover:bg-gray-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600" aria-label={t("openSettings")}>
             SF
           </Link>
         </div>

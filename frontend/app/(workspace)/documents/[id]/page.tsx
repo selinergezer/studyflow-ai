@@ -1,17 +1,19 @@
 import type { Metadata } from "next";
 import DocumentWorkspace from "@/components/documents/DocumentWorkspace";
-import { getMockDocument } from "@/lib/mock-data";
 
 type DocumentPageProps = {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ tab?: string }>;
 };
 
 export async function generateMetadata({ params }: DocumentPageProps): Promise<Metadata> {
-  const { id } = await params;
-  return { title: getMockDocument(id).name };
+  await params;
+  return { title: "Belge detayı" };
 }
 
-export default async function DocumentPage({ params }: DocumentPageProps) {
+export default async function DocumentPage({ params, searchParams }: DocumentPageProps) {
   const { id } = await params;
-  return <DocumentWorkspace document={getMockDocument(id)} />;
+  const { tab } = await searchParams;
+  const initialTab = tab === "quiz" || tab === "flashcards" ? tab : "summary";
+  return <DocumentWorkspace key={`${id}-${initialTab}`} documentId={id} initialTab={initialTab} />;
 }

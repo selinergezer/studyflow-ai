@@ -6,7 +6,7 @@ import { useLanguage } from "@/providers/LanguageProvider";
 import type { TranslationKey } from "@/lib/translations";
 
 const actions: Array<{ label: TranslationKey; description: TranslationKey; href: string; icon: DashboardIconName }> = [
-  { label: "uploadPdf", description: "uploadPdfDesc", href: "/upload", icon: "upload" }, { label: "createQuiz", description: "createQuizDesc", href: "/quiz", icon: "quiz" }, { label: "generateFlashcards", description: "generateFlashcardsDesc", href: "/flashcards", icon: "cards" }, { label: "askAi", description: "askAiDesc", href: "/library", icon: "chat" },
+  { label: "uploadPdf", description: "uploadPdfDesc", href: "/upload", icon: "upload" }, { label: "createQuiz", description: "createQuizDesc", href: "/library?action=quiz", icon: "quiz" }, { label: "generateFlashcards", description: "generateFlashcardsDesc", href: "/library?action=flashcards", icon: "cards" }, { label: "askAi", description: "askAiDesc", href: "/library", icon: "chat" },
 ];
 
 export default function QuickActions() {

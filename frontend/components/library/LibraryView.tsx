@@ -1,67 +1,23 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
-import DocumentCard from "@/components/documents/DocumentCard";
-import { mockDocuments } from "@/lib/mock-data";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import Card from "@/components/ui/Card";
+import { apiFetch, type DocumentData } from "@/lib/api";
 import { useLanguage } from "@/providers/LanguageProvider";
 
-export default function LibraryView() {
-  const [query, setQuery] = useState("");
-  const { t } = useLanguage();
-  const filteredDocuments = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return mockDocuments;
-    return mockDocuments.filter((document) =>
-      `${document.name} ${document.course}`.toLowerCase().includes(normalizedQuery),
-    );
-  }, [query]);
+type LibraryAction = "quiz" | "flashcards";
 
-  return (
-    <div className="mx-auto max-w-5xl px-5 py-12 sm:px-8 sm:py-16">
-      <div className="animate-enter flex flex-col justify-between gap-6 sm:flex-row sm:items-end">
-        <div>
-          <p className="text-sm font-medium text-blue-600">{t("library")}</p>
-          <h1 className="mt-3 text-3xl font-semibold tracking-[-0.04em] text-gray-950 sm:text-4xl">{t("yourMaterials")}</h1>
-          <p className="mt-4 text-base text-gray-500">{t("libraryIntro")}</p>
-        </div>
-        <Link href="/upload" className="inline-flex h-11 items-center justify-center gap-2 self-start rounded-xl bg-blue-600 px-4 text-sm font-medium text-white transition hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 sm:self-auto">
-          <svg className="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
-          {t("addMaterial")}
-        </Link>
-      </div>
-
-      <div className="animate-enter relative mt-10 max-w-md [animation-delay:40ms]">
-        <svg className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 4 4" /></svg>
-        <label htmlFor="library-search" className="sr-only">{t("searchMaterials")}</label>
-        <input id="library-search" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("searchPlaceholder")} className="h-11 w-full rounded-xl border border-gray-200 bg-white pl-10 pr-3.5 text-sm text-gray-900 outline-none transition placeholder:text-gray-400 hover:border-gray-300 focus:border-blue-600 focus:ring-4 focus:ring-blue-600/10" />
-      </div>
-
-      <section className="animate-enter mt-6 [animation-delay:80ms]" aria-label={t("studyMaterials")}>
-        {mockDocuments.length === 0 ? (
-          <div className="rounded-3xl bg-white px-6 py-16 text-center ring-1 ring-gray-200">
-            <span className="mx-auto flex size-11 items-center justify-center rounded-2xl bg-gray-100 text-gray-500" aria-hidden="true">
-              <svg className="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M7 3.75h6.5L18 8.25v12H7V3.75Zm6.25.5V8.5h4.25" /></svg>
-            </span>
-            <h2 className="mt-5 text-sm font-medium text-gray-950">{t("firstMaterial")}</h2>
-            <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-gray-500">{t("firstMaterialDesc")}</p>
-            <Link href="/upload" className="mt-5 inline-flex text-sm font-medium text-blue-600 transition hover:text-blue-700">{t("uploadPdf")} →</Link>
-          </div>
-        ) : filteredDocuments.length > 0 ? (
-          <div className="grid gap-3">
-            {filteredDocuments.map((document) => <DocumentCard key={document.id} document={document} />)}
-          </div>
-        ) : (
-          <div className="rounded-3xl bg-white px-6 py-16 text-center ring-1 ring-gray-200">
-            <span className="mx-auto flex size-11 items-center justify-center rounded-2xl bg-gray-100 text-gray-500" aria-hidden="true">
-              <svg className="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 4 4" /></svg>
-            </span>
-            <h2 className="mt-5 text-sm font-medium text-gray-950">{t("noMaterials")}</h2>
-            <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-gray-500">{t("noMaterialsDesc")}</p>
-            <button type="button" onClick={() => setQuery("")} className="mt-5 text-sm font-medium text-blue-600 transition hover:text-blue-700">{t("clearSearch")}</button>
-          </div>
-        )}
-      </section>
-    </div>
-  );
+export default function LibraryView({ action }: { action?: LibraryAction }) {
+  const router = useRouter();
+  const { t } = useLanguage(); const [documents, setDocuments] = useState<DocumentData[]>([]); const [query, setQuery] = useState(""); const [loading, setLoading] = useState(true); const [error, setError] = useState<string | null>(null);
+  useEffect(() => { apiFetch<DocumentData[]>("/documents/").then(setDocuments).catch((cause) => { console.error(cause); setError(cause instanceof Error ? cause.message : "İşlem sırasında bir hata oluştu."); }).finally(() => setLoading(false)); }, []);
+  const filtered = useMemo(() => documents.filter((item) => item.filename.toLowerCase().includes(query.toLowerCase())), [documents, query]);
+  function selectDocument(id: number) {
+    if (action === "quiz") router.push(`/documents/${id}?tab=quiz`);
+    else if (action === "flashcards") router.push(`/documents/${id}?tab=flashcards`);
+  }
+  const documentCard = (item: DocumentData) => <Card className="p-5 text-left transition hover:bg-gray-50"><h2 className="font-medium text-gray-950">{item.filename}</h2><p className="mt-2 text-sm text-gray-500">{item.page_count} {t("pages")}</p></Card>;
+  return <div className="mx-auto max-w-5xl px-5 py-12 sm:px-8 sm:py-16"><div className="flex justify-between gap-6"><div><p className="text-sm font-medium text-blue-600">{t("library")}</p><h1 className="mt-3 text-3xl font-semibold text-gray-950">{t("yourMaterials")}</h1><p className="mt-4 text-gray-500">{action ? (action === "quiz" ? t("selectQuizMaterial") : t("selectFlashcardMaterial")) : t("libraryIntro")}</p></div><Link href="/upload" className="inline-flex h-11 items-center rounded-xl bg-blue-600 px-4 text-sm font-medium text-white">{t("addMaterial")}</Link></div><input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t("searchPlaceholder")} className="mt-10 h-11 w-full max-w-md rounded-xl border border-gray-200 bg-white px-4 text-sm" />{error ? <p className="mt-5 text-sm text-red-600">{error}</p> : null}{loading ? <p className="mt-8 text-sm text-gray-500">Yükleniyor...</p> : <div className="mt-6 grid gap-3">{filtered.map((item) => action ? <button key={item.id} type="button" onClick={() => selectDocument(item.id!)}>{documentCard(item)}</button> : <Link key={item.id} href={`/documents/${item.id}`}>{documentCard(item)}</Link>)}</div>}</div>;
 }
