@@ -5,6 +5,10 @@ from pydantic import BaseModel
 from app.core.config import settings
 
 
+# =========================================================
+# GEMINI CLIENT
+# =========================================================
+
 client = genai.Client(
     api_key=settings.GEMINI_API_KEY
 )
@@ -63,7 +67,10 @@ Ders Notu:
 # AI QUIZ OLUŞTURMA
 # =========================================================
 
-def generate_quiz(text: str, question_count: int = 10):
+def generate_quiz(
+    text: str,
+    question_count: int = 10
+):
 
     prompt = f"""
 Aşağıdaki ders notuna göre bir sınav quiz'i oluştur.
@@ -109,7 +116,13 @@ Ders Notu:
 
     return response.parsed
 
+
+# =========================================================
+# QUIZ TEST
+# =========================================================
+
 if __name__ == "__main__":
+
     test_text = """
     Olasılık, bir olayın gerçekleşme ihtimalini ifade eder.
     Bir olayın olasılığı 0 ile 1 arasında değer alır.
@@ -118,20 +131,60 @@ if __name__ == "__main__":
     Örneğin adil bir zar atıldığında 6 gelme olasılığı 1/6'dır.
     """
 
-    result = generate_quiz(test_text, 3)
+    result = generate_quiz(
+        test_text,
+        3
+    )
 
     print("\n===== QUIZ TEST =====")
 
-    for i, question in enumerate(result.questions, start=1):
+    for i, question in enumerate(
+        result.questions,
+        start=1
+    ):
+
         print(f"\nSoru {i}")
-        print("Tip:", question.question_type)
-        print("Soru:", question.question_text)
-        print("A:", question.option_a)
-        print("B:", question.option_b)
-        print("C:", question.option_c)
-        print("D:", question.option_d)
-        print("Cevap:", question.correct_answer)
-        print("Açıklama:", question.explanation)
+
+        print(
+            "Tip:",
+            question.question_type
+        )
+
+        print(
+            "Soru:",
+            question.question_text
+        )
+
+        print(
+            "A:",
+            question.option_a
+        )
+
+        print(
+            "B:",
+            question.option_b
+        )
+
+        print(
+            "C:",
+            question.option_c
+        )
+
+        print(
+            "D:",
+            question.option_d
+        )
+
+        print(
+            "Cevap:",
+            question.correct_answer
+        )
+
+        print(
+            "Açıklama:",
+            question.explanation
+        )
+
 
 # =========================================================
 # AI FLASHCARD OLUŞTURMA
@@ -146,7 +199,10 @@ class FlashcardResponse(BaseModel):
     flashcards: list[FlashcardItem]
 
 
-def generate_flashcards(text: str, flashcard_count: int = 10):
+def generate_flashcards(
+    text: str,
+    flashcard_count: int = 10
+):
 
     prompt = f"""
 Aşağıdaki ders notuna göre {flashcard_count} adet flashcard oluştur.
@@ -174,6 +230,72 @@ Ders Notu:
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=FlashcardResponse,
+        ),
+    )
+
+    return response.parsed
+
+
+# =========================================================
+# AI ÇALIŞMA ÖNERİSİ
+# =========================================================
+
+class StudyRecommendation(BaseModel):
+    message: str
+    priority: str
+    recommended_action: str
+
+
+def generate_study_recommendation(
+    total_courses: int,
+    total_quizzes: int,
+    quiz_average: float,
+    total_flashcards: int,
+    flashcard_reviews: int,
+    weakest_course: str | None = None,
+    study_hours: float = 0
+):
+
+    prompt = f"""
+Bir öğrencinin çalışma verilerini analiz et ve
+ona kişiselleştirilmiş bir çalışma önerisi oluştur.
+
+Öğrenci verileri:
+
+- Toplam ders sayısı: {total_courses}
+- Toplam quiz sayısı: {total_quizzes}
+- Quiz ortalaması: {quiz_average}
+- Toplam flashcard sayısı: {total_flashcards}
+- Yapılan flashcard tekrar sayısı: {flashcard_reviews}
+- En zayıf ders: {weakest_course or "Belirlenmemiş"}
+- Çalışma süresi: {study_hours} saat
+
+Kurallar:
+
+- Türkçe yaz.
+- Öğrencinin verilerine göre gerçekçi bir öneri oluştur.
+- Verilmeyen bilgileri uydurma.
+- Kısa ve net ol.
+- Öğrenciye bugün ne yapması gerektiğini söyle.
+- Eğer quiz ortalaması düşükse quiz çalışmasına ağırlık ver.
+- Eğer flashcard tekrarları düşükse tekrar yapmasını öner.
+- En zayıf ders belli ise önceliği o derse ver.
+- Çalışma süresi düşükse uygulanabilir bir çalışma süresi öner.
+- Priority değeri yalnızca "low", "medium" veya "high" olabilir.
+
+message alanında öğrencinin mevcut durumunu
+kısa şekilde açıkla.
+
+recommended_action alanında öğrencinin bugün
+uygulayabileceği somut bir çalışma görevi ver.
+"""
+
+    response = client.models.generate_content(
+        model="gemini-3.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=StudyRecommendation,
         ),
     )
 

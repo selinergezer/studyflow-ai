@@ -56,3 +56,8 @@ class Course(Base):
         back_populates="course",
         cascade="all, delete"
     )
+
+    events = relationship(
+        "Event",
+        back_populates="course"
+    ) 

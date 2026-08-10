@@ -16,6 +16,7 @@ from app.models.flashcard import Flashcard
 from app.models.quiz_attempt import QuizAttempt
 from app.models.goal import Goal
 from app.models.achievement import Achievement
+from app.models.event import Event
 
 # =========================
 # API ROUTERLARI
@@ -29,6 +30,8 @@ from app.api.flashcard import router as flashcard_router
 from app.api.stats import router as stats_router
 from app.api.goal import router as goal_router
 from app.api.achievement import router as achievement_router
+from app.api.event import router as event_router
+from app.api.dashboard import router as dashboard_router
 
 # =========================
 # DATABASE
@@ -59,6 +62,8 @@ app.include_router(flashcard_router)
 app.include_router(stats_router)
 app.include_router(goal_router)
 app.include_router(achievement_router)
+app.include_router(event_router)
+app.include_router(dashboard_router)
 
 @app.get("/")
 def root():
