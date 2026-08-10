@@ -3,8 +3,6 @@ from sqlalchemy.orm import relationship
 
 from app.db.database import Base
 
-from sqlalchemy.orm import relationship
-
 
 class Course(Base):
     __tablename__ = "courses"
@@ -27,7 +25,13 @@ class Course(Base):
     )
 
     documents = relationship(
-    "Document",
-    back_populates="course",
-    cascade="all, delete"
-    )  
+        "Document",
+        back_populates="course",
+        cascade="all, delete"
+    )
+
+    quizzes = relationship(
+        "Quiz",
+        back_populates="course",
+        cascade="all, delete"
+    )
