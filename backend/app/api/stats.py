@@ -8,6 +8,7 @@ from app.models.course import Course
 from app.models.quiz import Quiz
 from app.models.quiz_attempt import QuizAttempt
 from app.models.flashcard import Flashcard
+from app.models.achievement import Achievement
 
 from app.core.security import get_current_user
 
@@ -28,7 +29,10 @@ def get_stats_summary(
     current_user: User = Depends(get_current_user)
 ):
 
-    # Kullanıcının dersleri
+    # ========================================================
+    # DERSLER
+    # ========================================================
+
     courses = (
         db.query(Course)
         .filter(
@@ -37,7 +41,10 @@ def get_stats_summary(
         .all()
     )
 
-    course_ids = [course.id for course in courses]
+    course_ids = [
+        course.id
+        for course in courses
+    ]
 
     total_courses = len(courses)
 
@@ -48,9 +55,15 @@ def get_stats_summary(
             "total_quizzes": 0,
             "total_quiz_attempts": 0,
             "average_quiz_score": 0,
+            "total_quiz_correct": 0,
+            "total_quiz_wrong": 0,
+            "total_quiz_questions": 0,
             "total_flashcards": 0,
             "flashcards_reviewed": 0,
-            "flashcard_accuracy": 0
+            "flashcard_correct": 0,
+            "flashcard_wrong": 0,
+            "flashcard_accuracy": 0,
+            "total_achievements": 0
         }
 
     # ========================================================
@@ -67,7 +80,10 @@ def get_stats_summary(
 
     total_quizzes = len(quizzes)
 
-    quiz_ids = [quiz.id for quiz in quizzes]
+    quiz_ids = [
+        quiz.id
+        for quiz in quizzes
+    ]
 
     # ========================================================
     # QUIZ DENEMELERİ
@@ -89,7 +105,10 @@ def get_stats_summary(
 
     total_quiz_attempts = len(attempts)
 
-    # Ortalama quiz skoru
+    # ========================================================
+    # QUIZ İSTATİSTİKLERİ
+    # ========================================================
+
     if attempts:
 
         average_quiz_score = round(
@@ -100,9 +119,27 @@ def get_stats_summary(
             2
         )
 
+        total_quiz_correct = sum(
+            attempt.correct_count
+            for attempt in attempts
+        )
+
+        total_quiz_wrong = sum(
+            attempt.wrong_count
+            for attempt in attempts
+        )
+
+        total_quiz_questions = sum(
+            attempt.total_questions
+            for attempt in attempts
+        )
+
     else:
 
         average_quiz_score = 0
+        total_quiz_correct = 0
+        total_quiz_wrong = 0
+        total_quiz_questions = 0
 
     # ========================================================
     # FLASHCARDLAR
@@ -125,24 +162,27 @@ def get_stats_summary(
     )
 
     # Toplam doğru
-    total_correct = sum(
+    flashcard_correct = sum(
         flashcard.correct_count or 0
         for flashcard in flashcards
     )
 
     # Toplam yanlış
-    total_wrong = sum(
+    flashcard_wrong = sum(
         flashcard.wrong_count or 0
         for flashcard in flashcards
     )
 
-    total_reviews = total_correct + total_wrong
+    total_reviews = (
+        flashcard_correct +
+        flashcard_wrong
+    )
 
     # Flashcard başarı oranı
     if total_reviews > 0:
 
         flashcard_accuracy = round(
-            (total_correct / total_reviews) * 100,
+            (flashcard_correct / total_reviews) * 100,
             2
         )
 
@@ -151,17 +191,39 @@ def get_stats_summary(
         flashcard_accuracy = 0
 
     # ========================================================
+    # ACHIEVEMENTS
+    # ========================================================
+
+    total_achievements = (
+        db.query(Achievement)
+        .filter(
+            Achievement.user_id == current_user.id,
+            Achievement.completed == True
+        )
+        .count()
+    )
+
+    # ========================================================
     # SONUÇ
     # ========================================================
 
     return {
         "total_courses": total_courses,
+
         "total_quizzes": total_quizzes,
         "total_quiz_attempts": total_quiz_attempts,
         "average_quiz_score": average_quiz_score,
+        "total_quiz_correct": total_quiz_correct,
+        "total_quiz_wrong": total_quiz_wrong,
+        "total_quiz_questions": total_quiz_questions,
+
         "total_flashcards": total_flashcards,
         "flashcards_reviewed": flashcards_reviewed,
-        "flashcard_accuracy": flashcard_accuracy
+        "flashcard_correct": flashcard_correct,
+        "flashcard_wrong": flashcard_wrong,
+        "flashcard_accuracy": flashcard_accuracy,
+
+        "total_achievements": total_achievements
     }
 
 
@@ -186,7 +248,10 @@ def get_course_stats(
 
     results = []
 
-    # Her ders için ayrı ayrı istatistik hesapla
+    # ========================================================
+    # HER DERS İÇİN İSTATİSTİK
+    # ========================================================
+
     for course in courses:
 
         # ====================================================
@@ -228,7 +293,10 @@ def get_course_stats(
 
         attempt_count = len(attempts)
 
-        # Ortalama quiz skoru
+        # ====================================================
+        # QUIZ SKORU
+        # ====================================================
+
         if attempts:
 
             average_score = round(
@@ -239,9 +307,21 @@ def get_course_stats(
                 2
             )
 
+            quiz_correct = sum(
+                attempt.correct_count
+                for attempt in attempts
+            )
+
+            quiz_wrong = sum(
+                attempt.wrong_count
+                for attempt in attempts
+            )
+
         else:
 
             average_score = 0
+            quiz_correct = 0
+            quiz_wrong = 0
 
         # ====================================================
         # FLASHCARDLAR
@@ -258,24 +338,27 @@ def get_course_stats(
         flashcard_count = len(flashcards)
 
         # Toplam doğru
-        total_correct = sum(
+        flashcard_correct = sum(
             flashcard.correct_count or 0
             for flashcard in flashcards
         )
 
         # Toplam yanlış
-        total_wrong = sum(
+        flashcard_wrong = sum(
             flashcard.wrong_count or 0
             for flashcard in flashcards
         )
 
-        total_reviews = total_correct + total_wrong
+        total_reviews = (
+            flashcard_correct +
+            flashcard_wrong
+        )
 
         # Flashcard başarı oranı
         if total_reviews > 0:
 
             flashcard_accuracy = round(
-                (total_correct / total_reviews) * 100,
+                (flashcard_correct / total_reviews) * 100,
                 2
             )
 
@@ -290,10 +373,16 @@ def get_course_stats(
         results.append({
             "course_id": course.id,
             "course_name": course.name,
+
             "quiz_count": quiz_count,
             "attempt_count": attempt_count,
             "average_score": average_score,
+            "quiz_correct": quiz_correct,
+            "quiz_wrong": quiz_wrong,
+
             "flashcard_count": flashcard_count,
+            "flashcard_correct": flashcard_correct,
+            "flashcard_wrong": flashcard_wrong,
             "flashcard_accuracy": flashcard_accuracy
         })
 
