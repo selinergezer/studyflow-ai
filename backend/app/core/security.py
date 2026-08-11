@@ -1,6 +1,7 @@
 from fastapi.security import OAuth2PasswordRequestForm
 
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from jose import jwt
 from passlib.context import CryptContext
@@ -65,15 +66,22 @@ def get_current_user(
             algorithms=[settings.ALGORITHM]
         )
 
-        email: str = payload.get("sub")
+        subject: Optional[str] = payload.get("sub")
 
-        if email is None:
+        if subject is None:
             raise credentials_exception
 
     except JWTError:
         raise credentials_exception
 
-    user = db.query(User).filter(User.email == email).first()
+    # Yeni tokenlar değişmeyen kullanıcı ID'sini taşır. Daha önce verilmiş
+    # e-posta tabanlı tokenlar geçiş sürecinde çalışmaya devam eder.
+    try:
+        user_id = int(subject)
+    except (TypeError, ValueError):
+        user = db.query(User).filter(User.email == subject).first()
+    else:
+        user = db.query(User).filter(User.id == user_id).first()
 
     if user is None:
         raise credentials_exception
