@@ -82,13 +82,11 @@ def generate_quiz_endpoint(
     for generated_question in generated_quiz.questions:
 
         question = Question(
-            quiz_id=quiz.id,
-            question_type=generated_question.question_type,
-            question_text=generated_question.question_text,
             option_a=generated_question.option_a,
             option_b=generated_question.option_b,
             option_c=generated_question.option_c,
             option_d=generated_question.option_d,
+            option_e=generated_question.option_e,
             correct_answer=generated_question.correct_answer,
             explanation=generated_question.explanation
         )
@@ -114,6 +112,7 @@ def generate_quiz_endpoint(
                 "option_b": question.option_b,
                 "option_c": question.option_c,
                 "option_d": question.option_d,
+                "option_e": question.option_e,
                 "correct_answer": question.correct_answer,
                 "explanation": question.explanation
             }
@@ -193,7 +192,8 @@ def get_quiz(
                 "option_a": question.option_a,
                 "option_b": question.option_b,
                 "option_c": question.option_c,
-                "option_d": question.option_d
+                "option_d": question.option_d,
+                "option_e": question.option_e
             }
             for question in quiz.questions
         ]

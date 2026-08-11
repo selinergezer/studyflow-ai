@@ -35,6 +35,7 @@ from app.api.achievement import router as achievement_router
 from app.api.event import router as event_router
 from app.api.dashboard import router as dashboard_router
 from app.api.chat import router as chat_router
+from app.api.planner import router as planner_router
 
 # =========================
 # DATABASE
@@ -79,6 +80,7 @@ app.include_router(achievement_router)
 app.include_router(event_router)
 app.include_router(dashboard_router)
 app.include_router(chat_router)
+app.include_router(planner_router)
 
 @app.get("/")
 def root():

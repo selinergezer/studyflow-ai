@@ -37,6 +37,8 @@ class Question(Base):
 
     option_d = Column(String)
 
+    option_e = Column(String)
+
     correct_answer = Column(
         String,
         nullable=False
