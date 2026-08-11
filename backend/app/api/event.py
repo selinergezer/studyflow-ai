@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -25,9 +27,9 @@ def create_event(
     title: str,
     event_type: str,
     start_date: str,
-    description: str | None = None,
-    end_date: str | None = None,
-    course_id: int | None = None,
+    description: Optional[str] = None,
+    end_date: Optional[str] = None,
+    course_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -183,12 +185,12 @@ def get_event(
 @router.put("/{event_id}")
 def update_event(
     event_id: int,
-    title: str | None = None,
-    event_type: str | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    description: str | None = None,
-    completed: bool | None = None,
+    title: Optional[str] = None,
+    event_type: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    description: Optional[str] = None,
+    completed: Optional[bool] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):

@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from datetime import date
+from typing import Optional
 
 
 class GoalCreate(BaseModel):
@@ -8,16 +9,16 @@ class GoalCreate(BaseModel):
     target_value: float
     start_date: date
     end_date: date
-    course_id: int | None = None
+    course_id: Optional[int] = None
 
 
 class GoalUpdate(BaseModel):
-    title: str | None = None
-    goal_type: str | None = None
-    target_value: float | None = None
-    start_date: date | None = None
-    end_date: date | None = None
-    course_id: int | None = None
+    title: Optional[str] = None
+    goal_type: Optional[str] = None
+    target_value: Optional[float] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    course_id: Optional[int] = None
 
 
 class GoalResponse(BaseModel):
@@ -29,7 +30,7 @@ class GoalResponse(BaseModel):
     start_date: date
     end_date: date
     completed: bool
-    course_id: int | None = None
+    course_id: Optional[int] = None
 
     class Config:
         from_attributes = True

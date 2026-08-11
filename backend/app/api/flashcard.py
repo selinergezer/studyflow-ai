@@ -17,6 +17,8 @@ from app.schemas.flashcard import FlashcardReview
 
 from app.services.goal_service import update_goal_progress
 
+from typing import Optional
+
 
 router = APIRouter(
     prefix="/flashcards",
@@ -33,7 +35,7 @@ def create_flashcard(
     course_id: int,
     question: str,
     answer: str,
-    document_id: int | None = None,
+    document_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -79,7 +81,7 @@ def create_flashcard(
 
 @router.get("/")
 def get_flashcards(
-    course_id: int | None = None,
+    course_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):

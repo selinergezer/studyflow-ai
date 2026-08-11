@@ -1,6 +1,7 @@
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
+from typing import Optional
 
 from app.core.config import settings
 
@@ -22,10 +23,10 @@ class QuizQuestion(BaseModel):
     question_type: str
     question_text: str
 
-    option_a: str | None = None
-    option_b: str | None = None
-    option_c: str | None = None
-    option_d: str | None = None
+    option_a: Optional[str] = None
+    option_b: Optional[str] = None
+    option_c: Optional[str] = None
+    option_d: Optional[str] = None
 
     correct_answer: str
     explanation: str
@@ -252,7 +253,7 @@ def generate_study_recommendation(
     quiz_average: float,
     total_flashcards: int,
     flashcard_reviews: int,
-    weakest_course: str | None = None,
+    weakest_course: Optional[str] = None,    
     study_hours: float = 0
 ):
 
@@ -300,3 +301,40 @@ uygulayabileceği somut bir çalışma görevi ver.
     )
 
     return response.parsed
+
+# =========================================================
+# PDF ÜZERİNDEN AI SOHBET
+# =========================================================
+
+def ask_ai_about_document(
+    document_text: str,
+    question: str
+):
+    prompt = f"""
+Sen StudyFlow AI adlı kişisel öğrenme platformunun
+ders asistanısın.
+
+Aşağıdaki ders notunu kaynak olarak kullanarak
+öğrencinin sorusunu cevapla.
+
+Kurallar:
+- Yalnızca verilen ders notundaki bilgilere dayan.
+- Ders notunda cevap yoksa bunu açıkça belirt.
+- Bilgi uydurma.
+- Türkçe cevap ver.
+- Anlaşılır ve öğretici ol.
+- Gereksiz uzun cevap verme.
+
+DERS NOTU:
+{document_text[:30000]}
+
+ÖĞRENCİNİN SORUSU:
+{question}
+"""
+
+    response = client.models.generate_content(
+        model="gemini-3.5-flash",
+        contents=prompt,
+    )
+
+    return response.text
