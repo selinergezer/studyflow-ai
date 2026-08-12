@@ -61,3 +61,15 @@ class Course(Base):
         "Event",
         back_populates="course"
     ) 
+
+    study_sessions = relationship(
+    "StudySession",
+    back_populates="course",
+    cascade="all, delete-orphan"
+    )
+
+    topics = relationship(
+    "Topic",
+    back_populates="course",
+    cascade="all, delete-orphan"
+)
