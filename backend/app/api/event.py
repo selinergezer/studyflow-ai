@@ -346,3 +346,48 @@ def delete_event(
     return {
         "message": "Event başarıyla silindi."
     }
+
+# ============================================================
+# TARİH ARALIĞINA GÖRE EVENTLER
+# ============================================================
+
+@router.get("/calendar/range")
+def get_calendar_events(
+    start_date: datetime,
+    end_date: datetime,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=400,
+            detail="end_date, start_date tarihinden önce olamaz."
+        )
+
+    events = (
+        db.query(Event)
+        .filter(
+            Event.user_id == current_user.id,
+            Event.start_date >= start_date,
+            Event.start_date <= end_date
+        )
+        .order_by(
+            Event.start_date.asc()
+        )
+        .all()
+    )
+
+    return [
+        {
+            "id": event.id,
+            "title": event.title,
+            "description": event.description,
+            "event_type": event.event_type,
+            "course_id": event.course_id,
+            "start_date": event.start_date,
+            "end_date": event.end_date,
+            "completed": event.completed
+        }
+        for event in events
+    ]

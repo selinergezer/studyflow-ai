@@ -12,6 +12,7 @@ from app.models.achievement import Achievement
 from app.models.study_session import StudySession
 
 from app.core.security import get_current_user
+from datetime import datetime, timezone, timedelta
 
 
 router = APIRouter(
@@ -329,3 +330,198 @@ def get_course_stats(
         })
 
     return results
+
+# ============================================================
+# ÇALIŞMA SERİSİ (STREAK)
+# ============================================================
+
+@router.get("/streak")
+def get_streak(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    sessions = (
+        db.query(StudySession.study_date)
+        .filter(
+            StudySession.user_id == current_user.id
+        )
+        .distinct()
+        .order_by(
+            StudySession.study_date.desc()
+        )
+        .all()
+    )
+
+    study_dates = [
+        session.study_date
+        for session in sessions
+    ]
+
+    if not study_dates:
+        return {
+            "current_streak": 0,
+            "longest_streak": 0
+        }
+
+    # ========================================================
+    # CURRENT STREAK
+    # ========================================================
+
+    today = datetime.now(timezone.utc).date()
+
+    date_set = set(study_dates)
+
+    # Kullanıcı bugün çalışmadıysa,
+    # dün çalıştıysa seri dünden devam eder.
+    if today in date_set:
+        current_date = today
+    elif (today - timedelta(days=1)) in date_set:
+        current_date = today - timedelta(days=1)
+    else:
+        current_date = None
+
+    current_streak = 0
+
+    if current_date is not None:
+
+        while current_date in date_set:
+
+            current_streak += 1
+
+            current_date = (
+                current_date - timedelta(days=1)
+            )
+
+    # ========================================================
+    # LONGEST STREAK
+    # ========================================================
+
+    longest_streak = 0
+    running_streak = 0
+    previous_date = None
+
+    for study_date in sorted(date_set):
+
+        if (
+            previous_date is not None
+            and study_date == previous_date + timedelta(days=1)
+        ):
+            running_streak += 1
+
+        else:
+            running_streak = 1
+
+        if running_streak > longest_streak:
+            longest_streak = running_streak
+
+        previous_date = study_date
+
+    return {
+        "current_streak": current_streak,
+        "longest_streak": longest_streak
+    }
+
+# ============================================================
+# HAFTALIK ÇALIŞMA İSTATİSTİKLERİ
+# ============================================================
+
+@router.get("/weekly")
+def get_weekly_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    today = datetime.now(timezone.utc).date()
+
+    # Pazartesiyi haftanın başlangıcı kabul ediyoruz
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6)
+
+    sessions = (
+        db.query(StudySession)
+        .filter(
+            StudySession.user_id == current_user.id,
+            StudySession.study_date >= week_start,
+            StudySession.study_date <= week_end
+        )
+        .all()
+    )
+
+    # ========================================================
+    # GÜN BAZLI ÇALIŞMA
+    # ========================================================
+
+    daily_minutes = {}
+
+    for i in range(7):
+        date = week_start + timedelta(days=i)
+
+        daily_minutes[str(date)] = 0
+
+    for session in sessions:
+
+        date_key = str(session.study_date)
+
+        if date_key in daily_minutes:
+            daily_minutes[date_key] += (
+                session.duration_minutes or 0
+            )
+
+    daily_hours = {
+        date: round(minutes / 60, 2)
+        for date, minutes in daily_minutes.items()
+    }
+
+    # ========================================================
+    # TOPLAM HAFTALIK ÇALIŞMA
+    # ========================================================
+
+    total_weekly_minutes = sum(
+        daily_minutes.values()
+    )
+
+    total_weekly_hours = round(
+        total_weekly_minutes / 60,
+        2
+    )
+
+    # ========================================================
+    # DERS BAZLI ÇALIŞMA
+    # ========================================================
+
+    course_stats = {}
+
+    courses = (
+        db.query(Course)
+        .filter(
+            Course.user_id == current_user.id
+        )
+        .all()
+    )
+
+    for course in courses:
+
+        course_minutes = sum(
+            session.duration_minutes or 0
+            for session in sessions
+            if session.course_id == course.id
+        )
+
+        course_stats[str(course.id)] = {
+            "course_id": course.id,
+            "course_name": course.name,
+            "study_minutes": course_minutes,
+            "study_hours": round(
+                course_minutes / 60,
+                2
+            )
+        }
+
+    return {
+        "week_start": week_start,
+        "week_end": week_end,
+        "total_weekly_minutes": total_weekly_minutes,
+        "total_weekly_hours": total_weekly_hours,
+        "daily_minutes": daily_minutes,
+        "daily_hours": daily_hours,
+        "courses": list(course_stats.values())
+    }

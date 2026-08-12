@@ -5,7 +5,9 @@ from app.db.database import get_db
 
 from app.models.study_session import StudySession
 from app.models.course import Course
+from app.models.goal import Goal
 from app.models.user import User
+from app.services.achievement_service import check_study_achievements
 
 from app.schemas.study_session import (
     StudySessionCreate,
@@ -23,6 +25,61 @@ router = APIRouter(
 
 
 # ============================================================
+# STUDY TIME HEDEFLERİNİ GÜNCELLE
+# ============================================================
+
+def update_study_time_goals(
+    db: Session,
+    user_id: int
+):
+    goals = (
+        db.query(Goal)
+        .filter(
+            Goal.user_id == user_id,
+            Goal.goal_type == "study_time"
+        )
+        .all()
+    )
+
+    for goal in goals:
+
+        query = (
+            db.query(StudySession)
+            .filter(
+                StudySession.user_id == user_id,
+                StudySession.study_date >= goal.start_date,
+                StudySession.study_date <= goal.end_date
+            )
+        )
+
+        # Hedef belirli bir derse aitse
+        if goal.course_id is not None:
+            query = query.filter(
+                StudySession.course_id == goal.course_id
+            )
+
+        sessions = query.all()
+
+        total_minutes = sum(
+            session.duration_minutes
+            for session in sessions
+        )
+
+        # study_time hedefini saat olarak tutuyoruz
+        total_hours = round(
+            total_minutes / 60,
+            2
+        )
+
+        goal.current_value = total_hours
+
+        if goal.current_value >= goal.target_value:
+            goal.completed = True
+        else:
+            goal.completed = False
+
+
+# ============================================================
 # ÇALIŞMA OTURUMU OLUŞTUR
 # ============================================================
 
@@ -36,7 +93,7 @@ def create_study_session(
     current_user: User = Depends(get_current_user)
 ):
 
-    # Ders kullanıcının kendi dersi mi?
+    # Kullanıcının kendi dersi mi?
     course = (
         db.query(Course)
         .filter(
@@ -69,6 +126,20 @@ def create_study_session(
     )
 
     db.add(study_session)
+    db.flush()
+
+# Study time hedeflerini güncelle
+    update_study_time_goals(
+    db,
+    current_user.id
+    )
+
+# Çalışma başarılarını kontrol et
+    check_study_achievements(
+    db,
+    current_user.id
+    )
+
     db.commit()
     db.refresh(study_session)
 
@@ -76,7 +147,7 @@ def create_study_session(
 
 
 # ============================================================
-# TÜM ÇALIŞMA OTURUMLARINI GETİR
+# TÜM ÇALIŞMA OTURUMLARI
 # ============================================================
 
 @router.get(
@@ -103,7 +174,7 @@ def get_study_sessions(
 
 
 # ============================================================
-# TEK ÇALIŞMA OTURUMU GETİR
+# TEK ÇALIŞMA OTURUMU
 # ============================================================
 
 @router.get(
@@ -202,6 +273,12 @@ def update_study_session(
     if session_data.description is not None:
         study_session.description = session_data.description
 
+    # Güncel çalışma kayıtlarına göre hedefleri yeniden hesapla
+    update_study_time_goals(
+        db,
+        current_user.id
+    )
+
     db.commit()
     db.refresh(study_session)
 
@@ -235,6 +312,14 @@ def delete_study_session(
         )
 
     db.delete(study_session)
+    db.flush()
+
+    # Kayıt silindikten sonra hedefleri yeniden hesapla
+    update_study_time_goals(
+        db,
+        current_user.id
+    )
+
     db.commit()
 
     return {
