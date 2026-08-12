@@ -1,9 +1,10 @@
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
-from typing import Optional
-import json
+from typing import Optional, Literal
+
 from app.core.config import settings
+from app.services.ollama_service import generate_with_ollama
 
 
 # =========================================================
@@ -20,16 +21,21 @@ client = genai.Client(
 # =========================================================
 
 class QuizQuestion(BaseModel):
-    question_type: str
+    # Artık yalnızca çoktan seçmeli soru kabul ediyoruz.
+    question_type: Literal["multiple_choice"]
+
     question_text: str
 
-    option_a: Optional[str] = None
-    option_b: Optional[str] = None
-    option_c: Optional[str] = None
-    option_d: Optional[str] = None
-    option_e: Optional[str] = None
+    # Beş şık da zorunlu.
+    option_a: str
+    option_b: str
+    option_c: str
+    option_d: str
+    option_e: str
 
-    correct_answer: str
+    # Doğru cevap yalnızca A-E olabilir.
+    correct_answer: Literal["A", "B", "C", "D", "E"]
+
     explanation: str
 
 
@@ -38,277 +44,316 @@ class QuizResponse(BaseModel):
 
 
 # =========================================================
-# PDF ÖZETLEME
+# PDF ÖZETLEME - OLLAMA
 # =========================================================
 
 def generate_summary(text: str):
 
     prompt = f"""
-Aşağıdaki ders notunu Türkçe özetle.
+Sen StudyFlow AI adlı öğrenme platformunun
+özetleme asistanısın.
 
-Kurallar:
+Aşağıdaki ders notunu yalnızca verilen içeriğe dayanarak özetle.
 
-- En fazla 250 kelime.
-- Madde madde yaz.
+DİL KURALI:
+- Özet, kaynak ders notuyla AYNI DİLDE olmalıdır.
+- Kaynak İngilizceyse İngilizce yaz.
+- Kaynak Türkçeyse Türkçe yaz.
+- Başka bir dildeyse mümkün olduğunca aynı dili kullan.
+
+KURALLAR:
+- Bilgi uydurma.
+- Ders notunda olmayan bilgi ekleme.
+- En fazla 500 kelime yaz.
+- Düzenli başlıklar ve maddeler kullan.
 - Önemli kavramları belirt.
+- Teknik terimleri koru.
+- Açık ve öğrenci dostu bir dil kullan.
+- Gereksiz giriş ve kapanış cümleleri yazma.
+- "Certainly", "Here is your summary" gibi gereksiz ifadeler yazma.
+- Yalnızca özeti döndür.
 
-Ders Notu:
+DERS NOTU:
 
 {text[:15000]}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-    )
-
-    return response.text
+    return generate_with_ollama(prompt)
 
 
 # =========================================================
-# AI QUIZ OLUŞTURMA
+# QUIZ DOĞRULAMA
 # =========================================================
 
-def _validate_quiz(quiz: QuizResponse, question_count: int):
-    """Validate Gemini quiz output before returning it to the API."""
+def _validate_quiz(
+    quiz: QuizResponse,
+    question_count: int
+):
 
-    if quiz is None or not quiz.questions:
-        raise ValueError("AI hiç soru oluşturmadı.")
+    if quiz is None:
+        raise ValueError(
+            "AI quiz cevabı boş döndü."
+        )
 
+    if not quiz.questions:
+        raise ValueError(
+            "AI hiç soru oluşturmadı."
+        )
+
+    # İstenen soru sayısı tam olmalı.
     if len(quiz.questions) != question_count:
         raise ValueError(
             f"AI {question_count} soru yerine "
             f"{len(quiz.questions)} soru oluşturdu."
         )
 
-    valid_types = {"multiple_choice", "true_false", "classic"}
+    for index, question in enumerate(
+        quiz.questions,
+        start=1
+    ):
 
-    for index, question in enumerate(quiz.questions, start=1):
+        # -----------------------------------------------------
+        # SORU METNİ
+        # -----------------------------------------------------
 
-        if question.question_type not in valid_types:
+        if not question.question_text.strip():
+            raise ValueError(
+                f"{index}. sorunun soru metni boş."
+            )
+
+        # -----------------------------------------------------
+        # QUESTION TYPE
+        # -----------------------------------------------------
+
+        if question.question_type != "multiple_choice":
             raise ValueError(
                 f"{index}. sorunun soru tipi geçersiz: "
                 f"{question.question_type}"
             )
 
-        if not question.question_text.strip():
-            raise ValueError(f"{index}. sorunun soru metni boş.")
+        # -----------------------------------------------------
+        # ŞIKLAR
+        # -----------------------------------------------------
 
-        if not question.correct_answer.strip():
-            raise ValueError(f"{index}. sorunun doğru cevabı boş.")
+        options = [
+            question.option_a,
+            question.option_b,
+            question.option_c,
+            question.option_d,
+            question.option_e,
+        ]
+
+        # Hiçbir şık boş olmamalı.
+        if any(
+            option is None or not option.strip()
+            for option in options
+        ):
+            raise ValueError(
+                f"{index}. soruda eksik veya boş şık var."
+            )
+
+        # Şıklar birbirinden farklı olmalı.
+        normalized_options = [
+            option.strip().casefold()
+            for option in options
+        ]
+
+        if len(set(normalized_options)) != 5:
+            raise ValueError(
+                f"{index}. soruda tekrarlanan şık var."
+            )
+
+        # -----------------------------------------------------
+        # DOĞRU CEVAP
+        # -----------------------------------------------------
+
+        correct_answer = (
+            question.correct_answer
+            .strip()
+            .upper()
+        )
+
+        if correct_answer not in {
+            "A",
+            "B",
+            "C",
+            "D",
+            "E"
+        }:
+            raise ValueError(
+                f"{index}. sorunun doğru cevabı "
+                f"A, B, C, D veya E olmalı."
+            )
+
+        # -----------------------------------------------------
+        # AÇIKLAMA
+        # -----------------------------------------------------
 
         if not question.explanation.strip():
-            raise ValueError(f"{index}. sorunun açıklaması boş.")
-
-        if question.question_type == "multiple_choice":
-
-            options = [
-                question.option_a,
-                question.option_b,
-                question.option_c,
-                question.option_d,
-                question.option_e,
-            ]
-
-            if any(
-                option is None or not option.strip()
-                for option in options
-            ):
-                raise ValueError(
-                    f"{index}. multiple choice sorusunda "
-                    f"eksik veya boş şık var."
-                )
-
-            normalized_options = [
-                option.strip().casefold()
-                for option in options
-            ]
-
-            if len(set(normalized_options)) != 5:
-                raise ValueError(
-                    f"{index}. multiple choice sorusunda "
-                    f"tekrarlanan şık var."
-                )
-
-            correct_answer = question.correct_answer.strip().upper()
-
-            if correct_answer not in {"A", "B", "C", "D", "E"}:
-                raise ValueError(
-                    f"{index}. multiple choice sorusunun "
-                    f"doğru cevabı A, B, C, D veya E olmalı."
-                )
-
-        elif question.question_type == "true_false":
-
-            correct_answer = question.correct_answer.strip().casefold()
-
-            if correct_answer not in {"doğru", "yanlış"}:
-                raise ValueError(
-                    f"{index}. true_false sorusunun "
-                    f"cevabı Doğru veya Yanlış olmalı."
-                )
-
-            question.option_a = None
-            question.option_b = None
-            question.option_c = None
-            question.option_d = None
-            question.option_e = None
-
-        elif question.question_type == "classic":
-
-            question.option_a = None
-            question.option_b = None
-            question.option_c = None
-            question.option_d = None
-            question.option_e = None
+            raise ValueError(
+                f"{index}. sorunun açıklaması boş."
+            )
 
     return quiz
 
 
+# =========================================================
+# AI QUIZ OLUŞTURMA - OLLAMA
+# =========================================================
+
 def generate_quiz(
+
     text: str,
+
     question_count: int = 10
+
 ):
 
-    prompt = f"""
+    questions = []
+
+    for question_number in range(1, question_count + 1):
+
+        prompt = f"""
+
 Sen StudyFlow AI adlı kişisel öğrenme platformunun
-sınav hazırlama asistanısın.
 
-Aşağıdaki ders notuna dayanarak TAM OLARAK
-{question_count} adet quiz sorusu oluştur.
+çoktan seçmeli sınav hazırlama asistanısın.
 
-==================================================
-ÇOK ÖNEMLİ
-==================================================
+Aşağıdaki ders notuna dayanarak SADECE 1 adet
 
-- Tam olarak {question_count} soru üret.
-- Eksik soru üretme.
-- Fazladan soru üretme.
-- Her soru tamamen doldurulmuş olmalıdır.
-- Boş soru üretme.
-- Boş seçenek üretme.
-- Sorular yalnızca verilen ders notundaki bilgilere dayanmalı.
+çoktan seçmeli soru oluştur.
+
+Bu soru, toplam {question_count} soruluk sınavın
+
+{question_number}. sorusudur.
+
+KURALLAR:
+
+- Yalnızca 1 soru üret.
+
+- question_type TAM OLARAK "multiple_choice" olmalıdır.
+
+- question_text dolu olmalıdır.
+
+- option_a dolu olmalıdır.
+
+- option_b dolu olmalıdır.
+
+- option_c dolu olmalıdır.
+
+- option_d dolu olmalıdır.
+
+- option_e dolu olmalıdır.
+
+- Beş seçenek birbirinden farklı olmalıdır.
+
+- correct_answer yalnızca "A", "B", "C", "D" veya "E" olmalıdır.
+
+- explanation dolu olmalıdır.
+
+- Soruyu yalnızca verilen ders notundaki bilgilerden oluştur.
+
 - Bilgi uydurma.
-- Sorular birbirinden farklı olmalı.
-- Türkçe yaz.
 
-==================================================
-SORU TİPLERİ
-==================================================
+- Soruyu ders notunun diliyle aynı dilde oluştur.
 
-Soru tiplerini dengeli şekilde kullan:
+- Mümkün olduğunca önceki sorulardan farklı bir kavram seç.
 
-1. multiple_choice
-2. true_false
-3. classic
-
-==================================================
-MULTIPLE CHOICE
-==================================================
-
-Her multiple_choice sorusunda TAM OLARAK 5 seçenek bulunmalıdır:
-
-- option_a dolu olmalı.
-- option_b dolu olmalı.
-- option_c dolu olmalı.
-- option_d dolu olmalı.
-- option_e dolu olmalı.
-- Beş seçenek birbirinden farklı olmalı.
-- Hiçbir seçenek boş olmamalı.
-- correct_answer yalnızca A, B, C, D veya E olmalı.
-- option_a, option_b, option_c, option_d ve option_e gerçek metin içermelidir.
-- "A", "B", "C", "D", "E" gibi yalnızca harf yazma.
-- "Seçenek", "Yok", "-" veya benzeri yer tutucu kullanma.
-- Beş seçeneğin tamamı soruyla doğrudan ilişkili olmalıdır.
-- Yanlış seçenekler de ders notundaki bilgilerle çelişmeyecek şekilde makul çeldiriciler olmalıdır.
-
-KESİNLİKLE BOŞ ŞIK ÜRETME.
-
-==================================================
-TRUE / FALSE
-==================================================
-
-true_false sorularında:
-
-- correct_answer yalnızca "Doğru" veya "Yanlış" olmalı.
-- option_a boş olmalı.
-- option_b boş olmalı.
-- option_c boş olmalı.
-- option_d boş olmalı.
-- option_e boş olmalı.
-
-==================================================
-CLASSIC
-==================================================
-
-classic sorularda:
-
-- option_a boş olmalı.
-- option_b boş olmalı.
-- option_c boş olmalı.
-- option_d boş olmalı.
-- option_e boş olmalı.
-- correct_answer kısa ve açık olmalı.
-
-==================================================
-GENEL KURALLAR
-==================================================
-
-- Öğrencinin konuyu gerçekten anlayıp anlamadığını ölç.
-- Aynı bilgiyi farklı cümlelerle tekrar etme.
-- Her sorunun question_text alanı dolu olmalı.
-- Her sorunun correct_answer alanı dolu olmalı.
-- Her sorunun explanation alanı dolu olmalı.
-- Hiçbir zorunlu alan boş bırakılamaz.
-
-Ders Notu:
+DERS NOTU:
 
 {text[:30000]}
+
 """
 
-    max_attempts = 1
+        max_attempts = 3
 
-    for attempt in range(1, max_attempts + 1):
+        generated_question = None
 
-        response = client.models.generate_content(
-            model="gemini-3.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=QuizResponse,
-            ),
-        )
+        for attempt in range(1, max_attempts + 1):
 
-        try:
-            quiz = response.parsed
+            try:
 
-            if quiz is None:
-                raise ValueError("AI cevabı boş döndü.")
+                raw_response = generate_with_ollama(
 
-            quiz = _validate_quiz(quiz, question_count)
+                    prompt,
 
-            print(
-                f"AI Quiz başarıyla oluşturuldu. "
-                f"Soru sayısı: {len(quiz.questions)}"
-            )
+                    response_schema=QuizQuestion.model_json_schema(),
 
-            return quiz
-
-        except ValueError as error:
-
-            print(
-                f"Quiz doğrulama hatası "
-                f"(deneme {attempt}/{max_attempts}): "
-                f"{error}"
-            )
-
-            if attempt == max_attempts:
-                raise ValueError(
-                    "AI geçerli bir quiz oluşturamadı. "
-                    "Lütfen tekrar deneyin."
                 )
 
-    raise ValueError("AI quiz oluşturma işlemi başarısız.")
+                generated_question = QuizQuestion.model_validate_json(
+
+                    raw_response
+
+                )
+
+                temp_quiz = QuizResponse(
+
+                    questions=[generated_question]
+
+                )
+
+                _validate_quiz(
+
+                    temp_quiz,
+
+                    1
+
+                )
+
+                break
+
+            except Exception as error:
+
+                print(
+
+                    f"Ollama {question_number}. soru doğrulama hatası "
+
+                    f"(deneme {attempt}/{max_attempts}): {error}"
+
+                )
+
+                if attempt == max_attempts:
+
+                    raise ValueError(
+
+                        f"{question_number}. soru oluşturulamadı."
+
+                    ) from error
+
+        if generated_question is None:
+
+            raise ValueError(
+
+                f"{question_number}. soru oluşturulamadı."
+
+            )
+
+        questions.append(generated_question)
+
+    quiz = QuizResponse(
+
+        questions=questions
+
+    )
+
+    quiz = _validate_quiz(
+
+        quiz,
+
+        question_count
+
+    )
+
+    print(
+
+        f"Ollama Quiz başarıyla oluşturuldu. "
+
+        f"Soru sayısı: {len(quiz.questions)}"
+
+    )
+
+    return quiz
 
 
 # =========================================================
@@ -322,7 +367,8 @@ if __name__ == "__main__":
     Bir olayın olasılığı 0 ile 1 arasında değer alır.
     Kesin olayın olasılığı 1, imkansız olayın olasılığı 0'dır.
 
-    Örneğin adil bir zar atıldığında 6 gelme olasılığı 1/6'dır.
+    Örneğin adil bir zar atıldığında
+    6 gelme olasılığı 1/6'dır.
     """
 
     result = generate_quiz(
@@ -330,7 +376,9 @@ if __name__ == "__main__":
         3
     )
 
-    print("\n===== QUIZ TEST =====")
+    print(
+        "\n===== QUIZ TEST ====="
+    )
 
     for i, question in enumerate(
         result.questions,
@@ -387,6 +435,7 @@ if __name__ == "__main__":
 
 # =========================================================
 # AI FLASHCARD OLUŞTURMA
+# ŞİMDİLİK GEMINI
 # =========================================================
 
 class FlashcardItem(BaseModel):
@@ -402,41 +451,111 @@ def generate_flashcards(
     text: str,
     flashcard_count: int = 10
 ):
+    flashcards = []
 
-    prompt = f"""
-Aşağıdaki ders notuna göre {flashcard_count} adet flashcard oluştur.
+    for card_number in range(1, flashcard_count + 1):
 
-Kurallar:
+        prompt = f"""
+Sen StudyFlow AI adlı öğrenme platformunun
+bilgi kartı hazırlama asistanısın.
 
-- Sorular yalnızca verilen ders notundaki bilgilere dayanmalı.
+Aşağıdaki ders notuna dayanarak SADECE 1 adet
+bilgi kartı oluştur.
+
+Bu kart toplam {flashcard_count} kartın
+{card_number}. kartıdır.
+
+KURALLAR:
+
+- Yalnızca 1 bilgi kartı oluştur.
+- question alanı dolu olmalıdır.
+- answer alanı dolu olmalıdır.
+- question SADECE tek bir soru içermelidir.
+- question kısa ve tek bir soru olmalıdır.
+- Gereksiz uzun soru yazma.
+- answer SADECE sorunun doğrudan cevabını içermelidir.
+- answer en fazla 40 kelime olmalıdır.
+- Uzun açıklama yazma.
+- Özet oluşturma.
+- Madde listesi oluşturma.
+- Numaralı liste oluşturma.
+- Markdown kullanma.
+- Başlık veya liste biçimlendirmesi kullanma.
+- Bir kartta yalnızca bir kavram veya bilgiyi ölç.
+- Kart yalnızca verilen ders notuna dayanmalıdır.
 - Bilgi uydurma.
-- Her soru farklı bir kavramı veya önemli bilgiyi ölçmeli.
-- Sorular kısa ve anlaşılır olmalı.
-- Cevaplar kısa ama yeterince açıklayıcı olmalı.
-- Türkçe yaz.
-- Flashcard'lar sınava hazırlanmak için kullanılabilecek nitelikte olmalı.
-- Gereksiz ayrıntılardan kaçın.
-- Aynı bilgiyi tekrar eden kartlar oluşturma.
-
-Ders Notu:
+- Ders notunda olmayan bilgi ekleme.
+- Ders notunun diliyle aynı dilde oluştur.
+DERS NOTU:
 
 {text[:30000]}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=FlashcardResponse,
-        ),
+        max_attempts = 3
+        generated_card = None
+
+        for attempt in range(1, max_attempts + 1):
+
+            try:
+                raw_response = generate_with_ollama(
+                    prompt,
+                    response_schema=FlashcardItem.model_json_schema(),
+                )
+
+                generated_card = FlashcardItem.model_validate_json(
+                    raw_response
+                )
+
+                if not generated_card.question.strip():
+                    raise ValueError(
+                        "Bilgi kartı sorusu boş."
+                    )
+
+                if not generated_card.answer.strip():
+                    raise ValueError(
+                        "Bilgi kartı cevabı boş."
+                    )
+                
+                if len(generated_card.answer.split()) > 40:
+                    raise ValueError(
+                        "Bilgi kartı cevabı çok uzun."
+                    )
+
+                break
+
+            except Exception as error:
+                print(
+                    f"Ollama {card_number}. bilgi kartı hatası "
+                    f"(deneme {attempt}/{max_attempts}): {error}"
+                )
+
+                if attempt == max_attempts:
+                    raise ValueError(
+                        f"{card_number}. bilgi kartı oluşturulamadı."
+                    ) from error
+
+        if generated_card is None:
+            raise ValueError(
+                f"{card_number}. bilgi kartı oluşturulamadı."
+            )
+
+        flashcards.append(generated_card)
+
+    result = FlashcardResponse(
+        flashcards=flashcards
     )
 
-    return response.parsed
+    print(
+        f"Ollama Bilgi Kartları başarıyla oluşturuldu. "
+        f"Kart sayısı: {len(result.flashcards)}"
+    )
+
+    return result
 
 
 # =========================================================
 # AI ÇALIŞMA ÖNERİSİ
+# ŞİMDİLİK GEMINI
 # =========================================================
 
 class StudyRecommendation(BaseModel):
@@ -451,7 +570,7 @@ def generate_study_recommendation(
     quiz_average: float,
     total_flashcards: int,
     flashcard_reviews: int,
-    weakest_course: Optional[str] = None,    
+    weakest_course: Optional[str] = None,
     study_hours: float = 0
 ):
 
@@ -480,7 +599,8 @@ Kurallar:
 - Eğer flashcard tekrarları düşükse tekrar yapmasını öner.
 - En zayıf ders belli ise önceliği o derse ver.
 - Çalışma süresi düşükse uygulanabilir bir çalışma süresi öner.
-- Priority değeri yalnızca "low", "medium" veya "high" olabilir.
+- Priority değeri yalnızca
+  "low", "medium" veya "high" olabilir.
 
 message alanında öğrencinin mevcut durumunu
 kısa şekilde açıkla.
@@ -489,25 +609,30 @@ recommended_action alanında öğrencinin bugün
 uygulayabileceği somut bir çalışma görevi ver.
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=StudyRecommendation,
-        ),
-    )
+    raw_response = generate_with_ollama(
+        prompt,
+        response_schema=StudyRecommendation.model_json_schema(),
+)
 
-    return response.parsed
+    result = StudyRecommendation.model_validate_json(
+    raw_response
+)
+
+    return result
+
+  
+
 
 # =========================================================
 # PDF ÜZERİNDEN AI SOHBET
+# ŞİMDİLİK GEMINI
 # =========================================================
 
 def ask_ai_about_document(
     document_text: str,
     question: str
 ):
+
     prompt = f"""
 Sen StudyFlow AI adlı kişisel öğrenme platformunun
 ders asistanısın.
@@ -515,31 +640,33 @@ ders asistanısın.
 Aşağıdaki ders notunu kaynak olarak kullanarak
 öğrencinin sorusunu cevapla.
 
-Kurallar:
+KURALLAR:
+
 - Yalnızca verilen ders notundaki bilgilere dayan.
-- Ders notunda cevap yoksa bunu açıkça belirt.
+- Ders notunda cevap yoksa açıkça belirt.
 - Bilgi uydurma.
-- Türkçe cevap ver.
+- Sorunun dilini ve ders notunun dilini dikkate al.
+- Cevabı mümkün olduğunca aynı dilde ver.
 - Anlaşılır ve öğretici ol.
 - Gereksiz uzun cevap verme.
+- Konuyla ilgisiz bilgi ekleme.
+- Gereksiz giriş ve kapanış cümleleri yazma.
 
 DERS NOTU:
+
 {document_text[:30000]}
 
 ÖĞRENCİNİN SORUSU:
+
 {question}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-    )
-
-    return response.text
+    return generate_with_ollama(prompt)
 
 
 # =========================================================
 # AI ÇALIŞMA PLANI OLUŞTURMA
+# ŞİMDİLİK GEMINI
 # =========================================================
 
 class StudyPlanItem(BaseModel):
@@ -570,6 +697,7 @@ def generate_study_plan(
     course_info = []
 
     for course in courses:
+
         course_info.append({
             "id": course.id,
             "name": course.name,
@@ -583,11 +711,18 @@ def generate_study_plan(
     event_info = []
 
     for event in events:
+
         event_info.append({
             "title": event.title,
             "event_type": event.event_type,
-            "start_date": str(event.start_date),
-            "end_date": str(event.end_date) if event.end_date else None,
+            "start_date": str(
+                event.start_date
+            ),
+            "end_date": (
+                str(event.end_date)
+                if event.end_date
+                else None
+            ),
             "course_id": event.course_id
         })
 
@@ -598,13 +733,18 @@ def generate_study_plan(
     goal_info = []
 
     for goal in goals:
+
         goal_info.append({
             "title": goal.title,
             "goal_type": goal.goal_type,
             "target_value": goal.target_value,
             "current_value": goal.current_value,
-            "start_date": str(goal.start_date),
-            "end_date": str(goal.end_date),
+            "start_date": str(
+                goal.start_date
+            ),
+            "end_date": str(
+                goal.end_date
+            ),
             "completed": goal.completed,
             "course_id": goal.course_id
         })
@@ -634,15 +774,14 @@ def generate_study_plan(
         daily_limit_minutes * 7
     )
 
-    # Haftalık hedef günlük kapasiteden büyükse
-    # AI'ya gerçekçi maksimum süreyi bildiriyoruz.
     effective_weekly_target_minutes = min(
         weekly_target_minutes,
         maximum_weekly_minutes
     )
 
     effective_weekly_target_hours = (
-        effective_weekly_target_minutes / 60
+        effective_weekly_target_minutes
+        / 60
     )
 
     # ---------------------------------------------------------
@@ -670,7 +809,8 @@ Günlük maksimum çalışma süresi:
 Öğrencinin haftalık çalışma hedefi:
 {weekly_hours_target} saat
 
-Öğrencinin uygulanabilir maksimum haftalık çalışma kapasitesi:
+Öğrencinin uygulanabilir maksimum
+haftalık çalışma kapasitesi:
 {maximum_weekly_minutes} dakika
 
 Planlanması gereken haftalık çalışma süresi:
@@ -680,13 +820,11 @@ Planlanması gereken haftalık çalışma süresi:
 Hedef GPA:
 {target_gpa}
 
-
 ==================================================
 ÖĞRENCİNİN DERSLERİ
 ==================================================
 
 {course_info}
-
 
 ==================================================
 YAKLAŞAN ETKİNLİKLER
@@ -694,13 +832,11 @@ YAKLAŞAN ETKİNLİKLER
 
 {event_info}
 
-
 ==================================================
 ÖĞRENCİNİN AKTİF HEDEFLERİ
 ==================================================
 
 {goal_info}
-
 
 ==================================================
 PLANLAMA KURALLARI
@@ -718,40 +854,28 @@ PLANLAMA KURALLARI
    Pazar
 
 3. Günlük toplam çalışma süresi
-   {daily_limit_minutes} dakikayı kesinlikle geçmemelidir.
+   {daily_limit_minutes} dakikayı
+   kesinlikle geçmemelidir.
 
 4. Haftalık toplam çalışma süresi
-   mümkün olduğunca tam olarak
-   {effective_weekly_target_minutes} dakika olmalıdır.
+   mümkün olduğunca
+   {effective_weekly_target_minutes}
+   dakika olmalıdır.
 
 5. Haftalık hedef günlük kapasiteden büyükse,
    günlük kapasiteyi aşma.
-   Bu durumda maksimum uygulanabilir süreyi kullan.
 
-6. Dersleri yalnızca öğrencinin gerçek
-   ders listesinden seç.
+6. Dersleri yalnızca öğrencinin
+   gerçek ders listesinden seç.
 
-7. Öğrencinin ders listesinde olmayan hiçbir
-   ders oluşturma.
+7. Öğrencinin ders listesinde olmayan
+   hiçbir ders oluşturma.
 
-8. Ders isimlerini kesinlikle birleştirme.
+8. Ders isimlerini birleştirme.
 
-   Örneğin:
+9. Her plan öğesinde yalnızca bir ders bulunmalıdır.
 
-   YANLIŞ:
-   "Matematik ve Veri Yapıları"
-
-   DOĞRU:
-   "Matematik"
-
-   veya:
-
-   "Veri Yapıları"
-
-9. Her plan öğesinde yalnızca BİR ders bulunmalıdır.
-
-10. Bir güne birden fazla çalışma kaydı
-    koyabilirsin.
+10. Bir güne birden fazla çalışma kaydı koyabilirsin.
 
 11. Yaklaşan sınavlara öncelik ver.
 
@@ -761,33 +885,26 @@ PLANLAMA KURALLARI
 
 14. Aktif hedefleri dikkate al.
 
-15. Hedef GPA yüksekse çalışma dağılımını
-    buna göre yap.
+15. Hedef GPA'yı dikkate al.
 
 16. Dersleri mümkün olduğunca dengeli dağıt.
 
 17. Aynı dersi gereksiz şekilde her güne koyma.
 
-18. Ancak yaklaşan sınav veya önemli bir
-    deadline varsa ilgili derse daha fazla
-    çalışma süresi ayırabilirsin.
+18. Önemli deadline varsa ilgili derse
+    daha fazla zaman ayırabilirsin.
 
-19. Konu bilgisi verilmediği için konu
-    uydurma.
+19. Konu bilgisi verilmediği için konu uydurma.
 
-20. Output içinde topics alanı bulunmayacaktır.
+20. topics alanı kullanma.
 
-21. Her çalışma kaydının duration_minutes
-    değeri gerçekçi olmalıdır.
+21. duration_minutes gerçekçi olmalıdır.
 
 22. Çalışma süreleri dakika cinsinden olmalıdır.
 
-23. Her gün mutlaka çalışma kaydı oluşturmak
-    zorunda değilsin.
+23. Her gün çalışma olmak zorunda değildir.
 
-24. Fakat 7 günlük plan içerisinde toplam
-    çalışma süresini haftalık hedefe
-    mümkün olduğunca tam olarak ulaştır.
+24. Haftalık hedefe mümkün olduğunca yaklaş.
 
 25. Tamamlanmış hedefleri dikkate alma.
 
@@ -795,29 +912,24 @@ PLANLAMA KURALLARI
 
 27. Verilmeyen bilgileri uydurma.
 
-28. general_advice içerisinde yanlış bir
-    haftalık toplam süre belirtme.
+28. general_advice içinde yanlış toplam süre verme.
 
-29. Planın toplam süresini hesaplarken
-    duration_minutes değerlerini dikkate al.
+29. duration_minutes değerlerini kullanarak
+    toplam süreyi hesapla.
 
 30. Haftalık hedef:
     {effective_weekly_target_minutes} dakika.
 
 31. Bu hedefi aşma.
 
-32. Mümkünse bu hedefin altında da kalma.
-
-
 ==================================================
 GEÇERLİ DERSLER
 ==================================================
 
-course alanı SADECE aşağıdaki değerlerden
-biri olabilir:
+course alanı SADECE aşağıdaki
+değerlerden biri olabilir:
 
 {course_names}
-
 
 ==================================================
 ÇIKTI KURALLARI
@@ -825,27 +937,24 @@ biri olabilir:
 
 JSON dışında hiçbir şey döndürme.
 
-weekly_plan içerisindeki her nesne şu alanlara
-sahip olmalıdır:
+weekly_plan içerisindeki her nesne
+şu alanlara sahip olmalıdır:
 
-- day
-- course
-- duration_minutes
-- reason
+day
+course
+duration_minutes
+reason
 
-topics ALANI KULLANMA.
+topics alanı kullanma.
 
-Her nesnede yalnızca bir ders olmalıdır.
+Her nesnede yalnızca bir ders bulunmalıdır.
 
-course değeri yukarıdaki gerçek derslerden
+course değeri yalnızca gerçek derslerden
 biri olmalıdır.
 
 duration_minutes pozitif bir sayı olmalıdır.
 
 general_advice kısa ve Türkçe olmalıdır.
-
-Plan öğrencinin günlük ve haftalık çalışma
-kapasitesini aşmamalıdır.
 """
 
     # ---------------------------------------------------------
@@ -867,12 +976,21 @@ kapasitesini aşmamalıdır.
 
     if response.parsed is None:
 
-        print("AI PLANNER RESPONSE PARSED NONE")
-        print("AI RESPONSE TEXT:")
-        print(response.text)
+        print(
+            "AI PLANNER RESPONSE PARSED NONE"
+        )
+
+        print(
+            "AI RESPONSE TEXT:"
+        )
+
+        print(
+            response.text
+        )
 
         raise ValueError(
-            "AI Planner geçerli bir plan oluşturamadı."
+            "AI Planner geçerli bir plan "
+            "oluşturamadı."
         )
 
     result = response.parsed
@@ -881,32 +999,40 @@ kapasitesini aşmamalıdır.
     # BACKEND KONTROLLERİ
     # ---------------------------------------------------------
 
-    valid_course_names = set(course_names)
+    valid_course_names = set(
+        course_names
+    )
 
     total_minutes = 0
 
     for item in result.weekly_plan:
 
-        # Geçersiz ders kontrolü
         if item.course not in valid_course_names:
 
             raise ValueError(
-                f"AI geçersiz bir ders oluşturdu: {item.course}"
+                f"AI geçersiz bir ders oluşturdu: "
+                f"{item.course}"
             )
 
-        # Günlük limit kontrolü daha aşağıda
-        total_minutes += item.duration_minutes
+        total_minutes += (
+            item.duration_minutes
+        )
 
     # ---------------------------------------------------------
     # HAFTALIK TOPLAM KONTROLÜ
     # ---------------------------------------------------------
 
-    if total_minutes > effective_weekly_target_minutes:
+    if (
+        total_minutes
+        > effective_weekly_target_minutes
+    ):
 
         raise ValueError(
             f"AI haftalık çalışma hedefini aştı. "
-            f"Hedef: {effective_weekly_target_minutes} dakika, "
-            f"oluşturulan: {total_minutes} dakika."
+            f"Hedef: "
+            f"{effective_weekly_target_minutes} dakika, "
+            f"oluşturulan: "
+            f"{total_minutes} dakika."
         )
 
     # ---------------------------------------------------------
@@ -918,7 +1044,10 @@ kapasitesini aşmamalıdır.
     for item in result.weekly_plan:
 
         daily_totals[item.day] = (
-            daily_totals.get(item.day, 0)
+            daily_totals.get(
+                item.day,
+                0
+            )
             + item.duration_minutes
         )
 
@@ -927,7 +1056,8 @@ kapasitesini aşmamalıdır.
         if total > daily_limit_minutes:
 
             raise ValueError(
-                f"{day} günü günlük çalışma limitini aşıyor. "
+                f"{day} günü günlük çalışma "
+                f"limitini aşıyor. "
                 f"Limit: {daily_limit_minutes} dakika, "
                 f"oluşturulan: {total} dakika."
             )
@@ -938,7 +1068,8 @@ kapasitesini aşmamalıdır.
 
     print(
         f"AI Planner oluşturuldu. "
-        f"Haftalık toplam: {total_minutes} dakika / "
+        f"Haftalık toplam: "
+        f"{total_minutes} dakika / "
         f"{effective_weekly_target_minutes} dakika"
     )
 

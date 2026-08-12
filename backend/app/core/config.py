@@ -14,6 +14,9 @@ class Settings(BaseSettings):
 
     GEMINI_API_KEY: str
 
+    OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
+    OLLAMA_MODEL: str = "llama3.2:3b"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=True,

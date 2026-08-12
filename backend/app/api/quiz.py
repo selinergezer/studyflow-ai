@@ -57,7 +57,7 @@ def generate_quiz_endpoint(
     if question_count < 1 or question_count > 20:
         raise HTTPException(
             status_code=400,
-            detail="Soru sayısı 1 ile 20 arasında olmalıdır."
+            detail="Soru sayısı yalnızca 5, 10 veya 15 olabilir."
         )
 
     # PDF metninden AI ile quiz oluştur
@@ -82,6 +82,9 @@ def generate_quiz_endpoint(
     for generated_question in generated_quiz.questions:
 
         question = Question(
+            quiz_id=quiz.id,
+            question_type=generated_question.question_type,
+            question_text=generated_question.question_text,
             option_a=generated_question.option_a,
             option_b=generated_question.option_b,
             option_c=generated_question.option_c,
