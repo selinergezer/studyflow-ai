@@ -15,7 +15,7 @@ export default function DocumentCard({ document, compact = false }: DocumentCard
   return (
     <Link
       href={`/documents/${document.id}`}
-      className={`group flex rounded-2xl bg-white ring-1 ring-gray-200 transition duration-200 hover:-translate-y-0.5 hover:ring-gray-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${compact ? "flex-col p-5" : "items-center gap-4 p-4 sm:p-5"}`}
+      className={`interactive-card group flex rounded-2xl bg-white ring-1 ring-gray-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${compact ? "flex-col p-5" : "items-center gap-4 p-4 sm:p-5"}`}
     >
       <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-red-50 text-red-600" aria-hidden="true">
         <svg className="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">

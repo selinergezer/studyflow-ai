@@ -5,22 +5,23 @@ import DashboardIcon, { type DashboardIconName } from "@/components/dashboard/Da
 import { useLanguage } from "@/providers/LanguageProvider";
 import type { TranslationKey } from "@/lib/translations";
 
-const actions: Array<{ label: TranslationKey; description: TranslationKey; href: string; icon: DashboardIconName }> = [
-  { label: "uploadPdf", description: "uploadPdfDesc", href: "/upload", icon: "upload" }, { label: "createQuiz", description: "createQuizDesc", href: "/library?action=quiz", icon: "quiz" }, { label: "generateFlashcards", description: "generateFlashcardsDesc", href: "/library?action=flashcards", icon: "cards" }, { label: "askAi", description: "askAiDesc", href: "/library", icon: "chat" },
+const actions: Array<{ label: TranslationKey; description: TranslationKey; href: string; icon: DashboardIconName; accent: "pdf" | "quiz" | "flashcard" | "ai" }> = [
+  { label: "uploadPdf", description: "uploadPdfDesc", href: "/upload", icon: "upload", accent: "pdf" }, { label: "createQuiz", description: "createQuizDesc", href: "/library?action=quiz", icon: "quiz", accent: "quiz" }, { label: "generateFlashcards", description: "generateFlashcardsDesc", href: "/library?action=flashcards", icon: "cards", accent: "flashcard" }, { label: "askAi", description: "askAiDesc", href: "/library", icon: "chat", accent: "ai" },
 ];
 
 export default function QuickActions() {
   const { t } = useLanguage();
   return (
-    <section className="animate-enter mt-9" aria-labelledby="quick-actions-heading">
+    <section className="dashboard-actions animate-enter" aria-labelledby="quick-actions-heading">
       <h2 id="quick-actions-heading" className="sr-only">{t("quickActions")}</h2>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="dashboard-actions-grid">
         {actions.map((action) => (
-          <Link key={action.label} href={action.href} className="group flex items-center gap-3 rounded-2xl bg-white p-4 ring-1 ring-gray-200 transition duration-200 hover:-translate-y-0.5 hover:ring-gray-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600">
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gray-100 text-gray-700 transition group-hover:bg-blue-50 group-hover:text-blue-600"><DashboardIcon name={action.icon} /></span>
-            <span className="min-w-0">
-              <span className="block text-sm font-medium text-gray-950">{t(action.label)}</span>
-              <span className="mt-0.5 block truncate text-xs text-gray-500">{t(action.description)}</span>
+          <Link key={action.label} href={action.href} className={`dashboard-action-card dashboard-action-card--${action.accent} interactive-card`}>
+            <span className="dashboard-action-flag" aria-hidden="true" />
+            <span className="dashboard-action-icon"><DashboardIcon name={action.icon} /></span>
+            <span>
+              <span className="dashboard-action-title">{t(action.label)}</span>
+              <span className="dashboard-action-description">{t(action.description)}</span>
             </span>
           </Link>
         ))}

@@ -27,27 +27,28 @@ export function RecentCourses({ courses, documents, loading }: DashboardSectionP
     .slice(0, 3);
 
   return (
-    <section aria-labelledby="recent-courses-heading">
-      <div className="flex items-center justify-between">
-        <h2 id="recent-courses-heading" className="text-sm font-semibold text-gray-950">{t("recentCourses")}</h2>
-        <Link href="/courses" className="text-sm text-gray-500 transition hover:text-gray-900">{t("viewAll")}</Link>
+    <section className="dashboard-section" aria-labelledby="recent-courses-heading">
+      <div className="dashboard-section-head">
+        <h2 id="recent-courses-heading">{t("recentCourses")}</h2>
+        <Link href="/courses">{t("viewAll")} →</Link>
       </div>
-      {loading ? <p className="mt-4 text-sm text-gray-500">{t("loading")}</p> : recentCourses.length ? (
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      {loading ? <p className="dashboard-loading">{t("loading")}</p> : recentCourses.length ? (
+        <div className="dashboard-course-row">
           {recentCourses.map((course) => {
             const count = documents.filter((document) => document.course_id === course.id).length;
             return (
-              <Link key={course.id} href={`/courses#course-${course.id}`} className="group rounded-2xl bg-white p-5 ring-1 ring-gray-200 transition duration-200 hover:-translate-y-0.5 hover:ring-gray-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600">
-                <span className="flex size-9 items-center justify-center rounded-xl bg-gray-100 text-gray-700"><DashboardIcon name="book" /></span>
-                <h3 className="mt-5 text-sm font-medium text-gray-950">{course.name}</h3>
-                {course.description ? <p className="mt-1.5 line-clamp-2 text-xs text-gray-500">{course.description}</p> : null}
-                <p className="mt-3 text-xs text-gray-500">{count} {t("documentsCount")}</p>
-                <span className="mt-4 inline-flex items-center gap-1 text-xs font-medium text-blue-600">{t("open")} <span className="transition-transform group-hover:translate-x-0.5">→</span></span>
+              <Link key={course.id} href={`/courses#course-${course.id}`} className="dashboard-course-card interactive-card">
+                <span className="dashboard-course-tag">{t("course")}</span>
+                <span className="dashboard-course-icon"><DashboardIcon name="book" /></span>
+                <h3>{course.name}</h3>
+                {course.description ? <p className="dashboard-course-description">{course.description}</p> : <p className="dashboard-course-description">&nbsp;</p>}
+                <span className="dashboard-paper-rule" aria-hidden="true" />
+                <span className="dashboard-course-foot"><span>{count} {t("documentsCount")}</span><strong>{t("open")} →</strong></span>
               </Link>
             );
           })}
         </div>
-      ) : <p className="mt-4 rounded-2xl bg-white p-5 text-sm text-gray-500 ring-1 ring-gray-200">{t("noCoursesYet")}</p>}
+      ) : <p className="dashboard-empty">{t("noCoursesYet")}</p>}
     </section>
   );
 }
@@ -64,27 +65,24 @@ export function RecentDocuments({ courses, documents, loading }: DashboardSectio
     .slice(0, 5);
 
   return (
-    <section aria-labelledby="recent-documents-heading">
-      <div className="flex items-center justify-between">
-        <h2 id="recent-documents-heading" className="text-sm font-semibold text-gray-950">{t("recentDocuments")}</h2>
-        <Link href="/library" className="text-sm text-gray-500 transition hover:text-gray-900">{t("viewLibrary")}</Link>
+    <section className="dashboard-section" aria-labelledby="recent-documents-heading">
+      <div className="dashboard-section-head">
+        <h2 id="recent-documents-heading">{t("recentDocuments")}</h2>
+        <Link href="/library">{t("viewLibrary")} →</Link>
       </div>
-      {loading ? <p className="mt-4 text-sm text-gray-500">{t("loading")}</p> : recentDocuments.length ? (
-        <div className="mt-4 overflow-hidden rounded-2xl bg-white ring-1 ring-gray-200">
-          {recentDocuments.map((document, index) => (
-            <Link key={documentId(document)} href={`/documents/${documentId(document)}`} className={`group flex items-center gap-4 p-4 transition hover:bg-gray-50 sm:p-5 ${index ? "border-t border-gray-100" : ""}`}>
-              <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-red-50 text-red-600" aria-hidden="true">
-                <svg className="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M7 3.75h6.5L18 8.25v12H7V3.75Zm6.25.5V8.5h4.25" /></svg>
+      {loading ? <p className="dashboard-loading">{t("loading")}</p> : recentDocuments.length ? (
+        <div className="dashboard-document-list">
+          {recentDocuments.map((document) => (
+            <Link key={documentId(document)} href={`/documents/${documentId(document)}`} className="dashboard-document-row interactive-row">
+              <span className="dashboard-document-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
               </span>
-              <div className="min-w-0 flex-1">
-                <h3 className="truncate text-sm font-medium text-gray-950">{document.filename}</h3>
-                <p className="mt-1 text-xs text-gray-500">{courseNames.get(document.course_id) ?? t("course")} · {document.page_count} {t("pages")}</p>
-              </div>
-              <span className="text-xs font-medium text-blue-600">{t("open")} →</span>
+              <span className="dashboard-document-info"><strong>{document.filename}</strong><small>{courseNames.get(document.course_id) ?? t("course")} · {document.page_count} {t("pages")}</small></span>
+              <span className="dashboard-document-open">{t("open")} →</span>
             </Link>
           ))}
         </div>
-      ) : <p className="mt-4 rounded-2xl bg-white p-5 text-sm text-gray-500 ring-1 ring-gray-200">{t("noDocumentsYet")}</p>}
+      ) : <p className="dashboard-empty">{t("noDocumentsYet")}</p>}
     </section>
   );
 }

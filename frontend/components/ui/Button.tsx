@@ -8,9 +8,9 @@ type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
 };
 
 const variants: Record<ButtonVariant, string> = {
-  primary: "bg-blue-600 text-white hover:bg-blue-700 focus-visible:outline-blue-600",
-  secondary: "border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 focus-visible:outline-blue-600",
-  ghost: "bg-transparent text-gray-600 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-gray-400",
+  primary: "interactive-button interactive-button--primary bg-blue-600 text-white focus-visible:outline-blue-600",
+  secondary: "interactive-button interactive-button--secondary border border-gray-200 bg-white text-gray-700 focus-visible:outline-blue-600",
+  ghost: "interactive-button interactive-button--ghost bg-transparent text-gray-600 focus-visible:outline-gray-400",
 };
 
 export default function Button({
