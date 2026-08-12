@@ -9,6 +9,7 @@ from app.models.quiz import Quiz
 from app.models.quiz_attempt import QuizAttempt
 from app.models.flashcard import Flashcard
 from app.models.achievement import Achievement
+from app.models.study_session import StudySession
 
 from app.core.security import get_current_user
 
@@ -29,29 +30,20 @@ def get_stats_summary(
     current_user: User = Depends(get_current_user)
 ):
 
-    # ========================================================
-    # DERSLER
-    # ========================================================
-
     courses = (
         db.query(Course)
-        .filter(
-            Course.user_id == current_user.id
-        )
+        .filter(Course.user_id == current_user.id)
         .all()
     )
 
-    course_ids = [
-        course.id
-        for course in courses
-    ]
-
+    course_ids = [course.id for course in courses]
     total_courses = len(courses)
 
-    # Kullanıcının hiç dersi yoksa
     if not course_ids:
         return {
             "total_courses": 0,
+            "total_study_minutes": 0,
+            "total_study_hours": 0,
             "total_quizzes": 0,
             "total_quiz_attempts": 0,
             "average_quiz_score": 0,
@@ -66,80 +58,65 @@ def get_stats_summary(
             "total_achievements": 0
         }
 
-    # ========================================================
-    # QUIZLER
-    # ========================================================
-
     quizzes = (
         db.query(Quiz)
-        .filter(
-            Quiz.course_id.in_(course_ids)
-        )
+        .filter(Quiz.course_id.in_(course_ids))
         .all()
     )
 
     total_quizzes = len(quizzes)
-
-    quiz_ids = [
-        quiz.id
-        for quiz in quizzes
-    ]
-
-    # ========================================================
-    # QUIZ DENEMELERİ
-    # ========================================================
+    quiz_ids = [quiz.id for quiz in quizzes]
 
     if quiz_ids:
-
         attempts = (
             db.query(QuizAttempt)
-            .filter(
-                QuizAttempt.quiz_id.in_(quiz_ids)
-            )
+            .filter(QuizAttempt.quiz_id.in_(quiz_ids))
             .all()
         )
-
     else:
-
         attempts = []
 
     total_quiz_attempts = len(attempts)
 
-    # ========================================================
-    # QUIZ İSTATİSTİKLERİ
-    # ========================================================
-
     if attempts:
-
         average_quiz_score = round(
-            sum(
-                attempt.score
-                for attempt in attempts
-            ) / len(attempts),
+            sum(attempt.score for attempt in attempts) / len(attempts),
             2
         )
 
         total_quiz_correct = sum(
-            attempt.correct_count
-            for attempt in attempts
+            attempt.correct_count for attempt in attempts
         )
 
         total_quiz_wrong = sum(
-            attempt.wrong_count
-            for attempt in attempts
+            attempt.wrong_count for attempt in attempts
         )
 
         total_quiz_questions = sum(
-            attempt.total_questions
-            for attempt in attempts
+            attempt.total_questions for attempt in attempts
         )
-
     else:
-
         average_quiz_score = 0
         total_quiz_correct = 0
         total_quiz_wrong = 0
         total_quiz_questions = 0
+
+    # ========================================================
+    # ÇALIŞMA SÜRELERİ
+    # ========================================================
+
+    study_sessions = (
+        db.query(StudySession)
+        .filter(StudySession.user_id == current_user.id)
+        .all()
+    )
+
+    total_study_minutes = sum(
+        session.duration_minutes or 0
+        for session in study_sessions
+    )
+
+    total_study_hours = round(total_study_minutes / 60, 2)
 
     # ========================================================
     # FLASHCARDLAR
@@ -147,47 +124,35 @@ def get_stats_summary(
 
     flashcards = (
         db.query(Flashcard)
-        .filter(
-            Flashcard.course_id.in_(course_ids)
-        )
+        .filter(Flashcard.course_id.in_(course_ids))
         .all()
     )
 
     total_flashcards = len(flashcards)
 
-    # Toplam review
     flashcards_reviewed = sum(
         flashcard.review_count or 0
         for flashcard in flashcards
     )
 
-    # Toplam doğru
     flashcard_correct = sum(
         flashcard.correct_count or 0
         for flashcard in flashcards
     )
 
-    # Toplam yanlış
     flashcard_wrong = sum(
         flashcard.wrong_count or 0
         for flashcard in flashcards
     )
 
-    total_reviews = (
-        flashcard_correct +
-        flashcard_wrong
-    )
+    total_reviews = flashcard_correct + flashcard_wrong
 
-    # Flashcard başarı oranı
     if total_reviews > 0:
-
         flashcard_accuracy = round(
             (flashcard_correct / total_reviews) * 100,
             2
         )
-
     else:
-
         flashcard_accuracy = 0
 
     # ========================================================
@@ -203,12 +168,11 @@ def get_stats_summary(
         .count()
     )
 
-    # ========================================================
-    # SONUÇ
-    # ========================================================
-
     return {
         "total_courses": total_courses,
+
+        "total_study_minutes": total_study_minutes,
+        "total_study_hours": total_study_hours,
 
         "total_quizzes": total_quizzes,
         "total_quiz_attempts": total_quiz_attempts,
@@ -237,22 +201,35 @@ def get_course_stats(
     current_user: User = Depends(get_current_user)
 ):
 
-    # Kullanıcının derslerini getir
     courses = (
         db.query(Course)
-        .filter(
-            Course.user_id == current_user.id
-        )
+        .filter(Course.user_id == current_user.id)
         .all()
     )
 
     results = []
 
-    # ========================================================
-    # HER DERS İÇİN İSTATİSTİK
-    # ========================================================
-
     for course in courses:
+
+        # ====================================================
+        # ÇALIŞMA SÜRELERİ
+        # ====================================================
+
+        study_sessions = (
+            db.query(StudySession)
+            .filter(
+                StudySession.user_id == current_user.id,
+                StudySession.course_id == course.id
+            )
+            .all()
+        )
+
+        study_minutes = sum(
+            session.duration_minutes or 0
+            for session in study_sessions
+        )
+
+        study_hours = round(study_minutes / 60, 2)
 
         # ====================================================
         # QUIZLER
@@ -260,65 +237,38 @@ def get_course_stats(
 
         quizzes = (
             db.query(Quiz)
-            .filter(
-                Quiz.course_id == course.id
-            )
+            .filter(Quiz.course_id == course.id)
             .all()
         )
 
         quiz_count = len(quizzes)
-
-        quiz_ids = [
-            quiz.id
-            for quiz in quizzes
-        ]
-
-        # ====================================================
-        # QUIZ DENEMELERİ
-        # ====================================================
+        quiz_ids = [quiz.id for quiz in quizzes]
 
         if quiz_ids:
-
             attempts = (
                 db.query(QuizAttempt)
-                .filter(
-                    QuizAttempt.quiz_id.in_(quiz_ids)
-                )
+                .filter(QuizAttempt.quiz_id.in_(quiz_ids))
                 .all()
             )
-
         else:
-
             attempts = []
 
         attempt_count = len(attempts)
 
-        # ====================================================
-        # QUIZ SKORU
-        # ====================================================
-
         if attempts:
-
             average_score = round(
-                sum(
-                    attempt.score
-                    for attempt in attempts
-                ) / len(attempts),
+                sum(attempt.score for attempt in attempts) / len(attempts),
                 2
             )
 
             quiz_correct = sum(
-                attempt.correct_count
-                for attempt in attempts
+                attempt.correct_count for attempt in attempts
             )
 
             quiz_wrong = sum(
-                attempt.wrong_count
-                for attempt in attempts
+                attempt.wrong_count for attempt in attempts
             )
-
         else:
-
             average_score = 0
             quiz_correct = 0
             quiz_wrong = 0
@@ -329,41 +279,30 @@ def get_course_stats(
 
         flashcards = (
             db.query(Flashcard)
-            .filter(
-                Flashcard.course_id == course.id
-            )
+            .filter(Flashcard.course_id == course.id)
             .all()
         )
 
         flashcard_count = len(flashcards)
 
-        # Toplam doğru
         flashcard_correct = sum(
             flashcard.correct_count or 0
             for flashcard in flashcards
         )
 
-        # Toplam yanlış
         flashcard_wrong = sum(
             flashcard.wrong_count or 0
             for flashcard in flashcards
         )
 
-        total_reviews = (
-            flashcard_correct +
-            flashcard_wrong
-        )
+        total_reviews = flashcard_correct + flashcard_wrong
 
-        # Flashcard başarı oranı
         if total_reviews > 0:
-
             flashcard_accuracy = round(
                 (flashcard_correct / total_reviews) * 100,
                 2
             )
-
         else:
-
             flashcard_accuracy = 0
 
         # ====================================================
@@ -373,6 +312,9 @@ def get_course_stats(
         results.append({
             "course_id": course.id,
             "course_name": course.name,
+
+            "study_minutes": study_minutes,
+            "study_hours": study_hours,
 
             "quiz_count": quiz_count,
             "attempt_count": attempt_count,
