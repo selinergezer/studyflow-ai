@@ -5,7 +5,7 @@ import Button from "@/components/ui/Button";
 import { apiFetch, type Flashcard } from "@/lib/api";
 import { useLanguage } from "@/providers/LanguageProvider";
 
-export default function FlashcardStudy({ cards }: { cards: Flashcard[] }) {
+export default function FlashcardStudy({ cards, onBack }: { cards: Flashcard[]; onBack?: () => void }) {
   const { language } = useLanguage();
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
@@ -40,7 +40,8 @@ export default function FlashcardStudy({ cards }: { cards: Flashcard[] }) {
         setIsFlipped(false);
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : (tr ? "Sonuç kaydedilemedi." : "The result could not be saved."));
+      console.error(cause);
+      setError(tr ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Data is currently unavailable. Please try again later.");
     } finally {
       setSaving(false);
     }
@@ -56,7 +57,7 @@ export default function FlashcardStudy({ cards }: { cards: Flashcard[] }) {
   }
 
   if (finished) {
-    return <div className="mx-auto mt-8 max-w-xl rounded-3xl bg-gray-50 p-8 text-center ring-1 ring-gray-200 sm:p-10">
+    return <div className="flashcard-study flashcard-study-finished mx-auto mt-8 max-w-xl rounded-3xl bg-gray-50 p-8 text-center ring-1 ring-gray-200 sm:p-10">
       <span className="mx-auto flex size-12 items-center justify-center rounded-2xl bg-green-50 text-green-600" aria-hidden="true">✓</span>
       <h2 className="mt-5 text-xl font-semibold tracking-[-0.025em] text-gray-950">{tr ? "Çalışma Tamamlandı" : "Study Complete"}</h2>
       <p className="mt-3 text-sm text-gray-500">{cards.length} {tr ? "Kart" : "Cards"}</p>
@@ -65,11 +66,11 @@ export default function FlashcardStudy({ cards }: { cards: Flashcard[] }) {
         <div className="rounded-2xl bg-white p-4 ring-1 ring-gray-200"><p className="text-lg font-semibold text-red-600">✕ {wrongCount}</p><p className="mt-1 text-xs text-gray-500">{tr ? "Yanlış" : "Wrong"}</p></div>
       </div>
       <p className="mt-6 font-medium text-gray-950">{tr ? "Başarı" : "Score"}: %{score}</p>
-      <Button className="mt-7" onClick={restart}>{tr ? "Tekrar Çalış" : "Study Again"}</Button>
+      <div className="flashcard-finished-actions"><Button onClick={restart}>{tr ? "Aynı Kartları Tekrar Çalış" : "Study the Same Cards Again"}</Button>{onBack ? <Button variant="secondary" onClick={onBack}>{tr ? "Kart Setlerine Dön" : "Back to Card Sets"}</Button> : null}</div>
     </div>;
   }
 
-  return <div className="mx-auto mt-8 max-w-2xl">
+  return <div className="flashcard-study mx-auto mt-8 max-w-2xl">
     <div className="flex items-end justify-between gap-4">
       <div><p className="text-sm font-medium text-gray-950">{tr ? "Kart" : "Card"} {currentIndex + 1} / {cards.length}</p><p className="mt-1 text-xs text-gray-500"><span className="text-green-600">✓ {correctCount} {tr ? "Doğru" : "Correct"}</span><span className="mx-2">·</span><span className="text-red-600">✕ {wrongCount} {tr ? "Yanlış" : "Wrong"}</span></p></div>
       <span className="text-xs font-medium text-gray-500">%{progress}</span>

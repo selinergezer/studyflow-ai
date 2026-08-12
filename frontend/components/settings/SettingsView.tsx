@@ -1,13 +1,15 @@
 "use client";
 
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import Button from "@/components/ui/Button";
+import Input from "@/components/ui/Input";
 import { useLanguage } from "@/providers/LanguageProvider";
 import type { TranslationKey } from "@/lib/translations";
+import { ApiError, apiErrorMessage, apiFetch, type CurrentUser } from "@/lib/api";
 
 type Theme = "light" | "dark";
-type Modal = "profile" | "connect" | "history" | "materials" | null;
+type Modal = "history" | "materials" | "profile" | "password" | null;
 
 const THEME_KEY = "studyflow.theme";
 const THEME_EVENT = "studyflow-theme-change";
@@ -22,11 +24,11 @@ function subscribeToTheme(callback: () => void) {
 }
 
 function getThemeSnapshot(): Theme {
-  return window.localStorage.getItem(THEME_KEY) === "dark" ? "dark" : "light";
+  return window.localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
 }
 
 function useTheme() {
-  const theme = useSyncExternalStore(subscribeToTheme, getThemeSnapshot, (): Theme => "light");
+  const theme = useSyncExternalStore(subscribeToTheme, getThemeSnapshot, (): Theme => "dark");
 
   function setTheme(value: Theme) {
     window.localStorage.setItem(THEME_KEY, value);
@@ -39,30 +41,31 @@ function useTheme() {
 
 function SettingRow({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-4 py-5 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between sm:gap-8">
-      <div className="max-w-xl">
-        <h3 className="text-sm font-medium text-gray-900">{title}</h3>
-        <p className="mt-1 text-sm leading-6 text-gray-500">{description}</p>
+    <div className="settings-row">
+      <div className="settings-row-copy">
+        <h3>{title}</h3>
+        <p>{description}</p>
       </div>
-      <div className="shrink-0">{children}</div>
+      <div className="settings-row-action">{children}</div>
     </div>
   );
 }
 
 function SettingsSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="grid gap-5 border-b border-gray-200 py-8 first:pt-0 last:border-b-0 lg:grid-cols-[180px_minmax(0,1fr)] lg:gap-12" aria-labelledby={`settings-${title}`}>
-      <h2 id={`settings-${title}`} className="text-sm font-semibold text-gray-950">{title}</h2>
-      <div className="divide-y divide-gray-100">{children}</div>
+    <section className="settings-paper-section" aria-labelledby={`settings-${title}`}>
+      <span className="settings-section-flag" aria-hidden="true" />
+      <h2 id={`settings-${title}`}>{title}</h2>
+      <div className="settings-section-body">{children}</div>
     </section>
   );
 }
 
 function SegmentedControl<T extends string>({ value, options, onChange, label }: { value: T; options: Array<{ value: T; label: string }>; onChange: (value: T) => void; label: string }) {
   return (
-    <div className="inline-flex rounded-xl bg-gray-100 p-1" role="group" aria-label={label}>
+    <div className="settings-segmented" role="group" aria-label={label}>
       {options.map((option) => (
-        <button key={option.value} type="button" onClick={() => onChange(option.value)} aria-pressed={value === option.value} className={`rounded-lg px-3 py-1.5 text-xs font-medium transition focus-visible:outline-2 focus-visible:outline-blue-600 ${value === option.value ? "bg-white text-gray-950 shadow-sm" : "text-gray-500 hover:text-gray-900"}`}>
+        <button key={option.value} type="button" onClick={() => onChange(option.value)} aria-pressed={value === option.value} className={value === option.value ? "active" : ""}>
           {option.label}
         </button>
       ))}
@@ -72,14 +75,14 @@ function SegmentedControl<T extends string>({ value, options, onChange, label }:
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (checked: boolean) => void; label: string }) {
   return (
-    <button type="button" role="switch" aria-checked={checked} aria-label={label} onClick={() => onChange(!checked)} className={`relative h-6 w-11 rounded-full transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 ${checked ? "bg-blue-600" : "bg-gray-300"}`}>
-      <span className={`absolute top-0.5 size-5 rounded-full bg-white shadow-sm transition-transform ${checked ? "translate-x-5" : "translate-x-0.5"}`} />
+    <button type="button" role="switch" aria-checked={checked} aria-label={label} onClick={() => onChange(!checked)} className={`settings-toggle ${checked ? "active" : ""}`}>
+      <span />
     </button>
   );
 }
 
-const modalContent: Record<Exclude<Modal, null>, { title: TranslationKey; description: TranslationKey; confirm: TranslationKey }> = {
-  profile: { title: "editProfile", description: "profileModalDesc", confirm: "understood" }, connect: { title: "connectAccount", description: "connectModalDesc", confirm: "understood" }, history: { title: "clearHistory", description: "confirmClearHistory", confirm: "clearHistoryButton" }, materials: { title: "clearUploads", description: "confirmClearUploads", confirm: "clearUploadsButton" },
+const modalContent: Record<"history" | "materials", { title: TranslationKey; description: TranslationKey; confirm: TranslationKey }> = {
+  history: { title: "clearHistory", description: "confirmClearHistory", confirm: "clearHistoryButton" }, materials: { title: "clearUploads", description: "confirmClearUploads", confirm: "clearUploadsButton" },
 };
 
 export default function SettingsView() {
@@ -90,6 +93,90 @@ export default function SettingsView() {
   const [quizReminders, setQuizReminders] = useState(true);
   const [modal, setModal] = useState<Modal>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [user, setUser] = useState<CurrentUser | null>(null);
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [profileUsername, setProfileUsername] = useState("");
+  const [profileEmail, setProfileEmail] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newPasswordAgain, setNewPasswordAgain] = useState("");
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileNotice, setProfileNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiFetch<CurrentUser>("/users/me")
+      .then(setUser)
+      .catch((cause) => {
+        console.error(cause);
+        setAccountError(apiErrorMessage(cause, language === "tr" ? "Hesap bilgileri yüklenemedi." : "Account details could not be loaded.", "İşlem şu anda gerçekleştirilemiyor. Lütfen daha sonra tekrar deneyin."));
+      });
+  }, [language]);
+
+  function openProfileModal() {
+    setProfileUsername(user?.username ?? "");
+    setProfileEmail(user?.email ?? "");
+    setModalError(null);
+    setProfileNotice(null);
+    setModal("profile");
+  }
+
+  function closeProfileModal() {
+    if (profileSaving) return;
+    setProfileUsername(user?.username ?? "");
+    setProfileEmail(user?.email ?? "");
+    setModalError(null);
+    setModal(null);
+  }
+
+  function openPasswordModal() {
+    setCurrentPassword("");
+    setNewPassword("");
+    setNewPasswordAgain("");
+    setModalError(null);
+    setModal("password");
+  }
+
+  async function submitProfile(event: React.FormEvent) {
+    event.preventDefault();
+    if (profileSaving) return;
+    if (!profileUsername.trim() || !profileEmail.trim()) {
+      setModalError(language === "tr" ? "Kullanıcı adı ve e-posta alanları boş bırakılamaz." : "Username and email cannot be empty.");
+      return;
+    }
+    setProfileSaving(true); setModalError(null);
+    try {
+      const updated = await apiFetch<CurrentUser & { message: string }>("/users/me", {
+        method: "PUT",
+        body: JSON.stringify({ username: profileUsername.trim(), email: profileEmail.trim() }),
+      });
+      const nextUser: CurrentUser = { id: updated.id, username: updated.username, email: updated.email };
+      setUser(nextUser);
+      setProfileNotice(language === "tr" ? "Profil başarıyla güncellendi." : "Profile updated successfully.");
+      window.dispatchEvent(new CustomEvent<CurrentUser>("studyflow-user-change", { detail: nextUser }));
+      setModal(null);
+    } catch (cause) {
+      console.error(cause);
+      setModalError(cause instanceof ApiError && cause.status === 409
+        ? cause.message
+        : (language === "tr" ? "Profil güncellenemedi. Lütfen tekrar deneyin." : "The profile could not be updated. Please try again."));
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
+  function submitPassword(event: React.FormEvent) {
+    event.preventDefault();
+    if (!currentPassword || !newPassword || !newPasswordAgain) {
+      setModalError("Tüm şifre alanlarını doldurun.");
+      return;
+    }
+    if (newPassword !== newPasswordAgain) {
+      setModalError("Yeni şifreler eşleşmiyor.");
+      return;
+    }
+    setModalError(null);
+  }
 
   function confirmModal() {
     if (modal === "history" || modal === "materials") setNotice(t("requestConfirmed"));
@@ -102,13 +189,15 @@ export default function SettingsView() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl px-5 py-10 sm:px-8 sm:py-14">
-      <header className="animate-enter border-b border-gray-200 pb-8">
-        <h1 className="text-2xl font-semibold tracking-[-0.035em] text-gray-950 sm:text-3xl">{t("settings")}</h1>
-        <p className="mt-2 text-sm leading-6 text-gray-500">{t("settingsIntro")}</p>
+    <div className="settings-page">
+      <header className="settings-heading">
+        <div className="settings-glow" aria-hidden="true" />
+        <p className="settings-eyebrow">{t("settings")}</p>
+        <h1>{t("settings")}</h1>
+        <p>{language === "tr" ? "Hesabını ve uygulama tercihlerini buradan yönet." : "Manage your account and application preferences here."}</p>
       </header>
 
-      <div className="animate-enter py-8 [animation-delay:40ms]">
+      <div className="settings-sections">
         <SettingsSection title={t("appearance")}>
           <SettingRow title={t("theme")} description={t("themeDesc")}>
             <SegmentedControl<Theme> value={theme} onChange={setTheme} label={t("theme")} options={[{ value: "light", label: t("light") }, { value: "dark", label: t("dark") }]} />
@@ -116,14 +205,22 @@ export default function SettingsView() {
         </SettingsSection>
 
         <SettingsSection title={t("account")}>
-          <SettingRow title={t("profile")} description={t("demoProfile")}>
-            <Button variant="secondary" onClick={() => setModal("profile")}>{t("editProfile")}</Button>
+          <SettingRow title={language === "tr" ? "Kullanıcı adı" : "Username"} description={user?.username ?? (language === "tr" ? "Yükleniyor..." : "Loading...")}>
+            <Button className="settings-action-button" variant="secondary" disabled={!user} onClick={openProfileModal}>{t("editProfile")}</Button>
           </SettingRow>
-          <SettingRow title={t("connectAccount")} description={t("connectDesc")}>
-            <Button onClick={() => setModal("connect")}>{t("createAccountLogin")}</Button>
+          <SettingRow title={language === "tr" ? "E-posta" : "Email"} description={user?.email ?? (language === "tr" ? "Yükleniyor..." : "Loading...")}>
+            <span className="text-xs text-gray-400">{language === "tr" ? "Hesap e-postası" : "Account email"}</span>
           </SettingRow>
+          <SettingRow title={language === "tr" ? "Şifre" : "Password"} description={language === "tr" ? "Şifrenizi güvenli tutun." : "Keep your password secure."}>
+            <Button className="settings-action-button" variant="secondary" disabled={!user} onClick={openPasswordModal}>{language === "tr" ? "Şifreyi Değiştir" : "Change Password"}</Button>
+          </SettingRow>
+          {accountError ? <p className="py-4 text-sm text-red-600" role="alert">{accountError}</p> : null}
+          {profileNotice ? <p className="py-4 text-sm text-green-600" role="status">{profileNotice}</p> : null}
+        </SettingsSection>
+
+        <SettingsSection title={language === "tr" ? "Oturum" : "Session"}>
           <SettingRow title={language === "tr" ? "Oturumu kapat" : "Sign out"} description={language === "tr" ? "Bu cihazdaki mevcut oturumunuzu kapatın." : "End your current session on this device."}>
-            <Button variant="secondary" onClick={logout}>{language === "tr" ? "Çıkış Yap" : "Sign Out"}</Button>
+            <Button className="settings-action-button settings-logout-button" variant="secondary" onClick={logout}>{language === "tr" ? "Çıkış Yap" : "Sign Out"}</Button>
           </SettingRow>
         </SettingsSection>
 
@@ -144,18 +241,18 @@ export default function SettingsView() {
 
         <SettingsSection title={t("myData")}>
           <SettingRow title={t("clearHistory")} description={t("clearHistoryDesc")}>
-            <Button variant="secondary" className="text-red-600 hover:text-red-700" onClick={() => { setNotice(null); setModal("history"); }}>{t("clearHistoryButton")}</Button>
+            <Button variant="secondary" className="settings-action-button settings-danger-button" onClick={() => { setNotice(null); setModal("history"); }}>{t("clearHistoryButton")}</Button>
           </SettingRow>
           <SettingRow title={t("clearUploads")} description={t("clearUploadsDesc")}>
-            <Button variant="secondary" className="text-red-600 hover:text-red-700" onClick={() => { setNotice(null); setModal("materials"); }}>{t("clearUploadsButton")}</Button>
+            <Button variant="secondary" className="settings-action-button settings-danger-button" onClick={() => { setNotice(null); setModal("materials"); }}>{t("clearUploadsButton")}</Button>
           </SettingRow>
           {notice ? <p className="pt-4 text-sm text-green-600" role="status">{notice}</p> : null}
         </SettingsSection>
 
-        <section className="pt-8" aria-labelledby="settings-about">
-          <h2 id="settings-about" className="text-sm font-semibold text-gray-950">{t("about")}</h2>
-          <div className="mt-4 text-sm leading-6 text-gray-500">
-            <p className="font-medium text-gray-900">StudyFlow</p>
+        <section className="settings-about" aria-labelledby="settings-about">
+          <h2 id="settings-about">{t("about")}</h2>
+          <div>
+            <p>StudyFlow</p>
             <p>{t("version")}</p>
             <p className="mt-2">{t("productDesc")}</p>
           </div>
@@ -163,15 +260,36 @@ export default function SettingsView() {
       </div>
 
       {modal ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/40 p-4" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setModal(null); }}>
-          <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-xl" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+        <div className="settings-modal-overlay" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) { if (modal === "profile") closeProfileModal(); else setModal(null); } }}>
+          {modal === "profile" ? <form onSubmit={submitProfile} className="settings-modal-paper w-full max-w-md p-6" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+            <h2 id="settings-modal-title" className="text-lg font-semibold text-gray-950">{t("editProfile")}</h2>
+            <p className="mt-2 text-sm leading-6 text-gray-500">{language === "tr" ? "Hesap bilgilerinizi görüntüleyin ve düzenleyin." : "View and edit your account details."}</p>
+            <div className="mt-6 space-y-4">
+              <Input id="profile-username" label={language === "tr" ? "Kullanıcı adı" : "Username"} value={profileUsername} disabled={profileSaving} onChange={(event) => setProfileUsername(event.target.value)} required />
+              <Input id="profile-email" type="email" label={language === "tr" ? "E-posta" : "Email"} value={profileEmail} disabled={profileSaving} onChange={(event) => setProfileEmail(event.target.value)} required />
+            </div>
+            {modalError ? <p className="mt-4 text-sm text-red-600" role="alert">{modalError}</p> : null}
+            <div className="mt-6 flex justify-end gap-2"><Button variant="secondary" disabled={profileSaving} onClick={closeProfileModal}>{t("cancel")}</Button><Button type="submit" disabled={profileSaving}>{profileSaving ? (language === "tr" ? "Kaydediliyor..." : "Saving...") : (language === "tr" ? "Kaydet" : "Save")}</Button></div>
+          </form> : null}
+
+          {modal === "password" ? <form onSubmit={submitPassword} className="settings-modal-paper w-full max-w-md p-6" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+            <h2 id="settings-modal-title" className="text-lg font-semibold text-gray-950">{language === "tr" ? "Şifreyi Değiştir" : "Change Password"}</h2>
+            <p className="mt-2 text-sm leading-6 text-gray-500">{language === "tr" ? "Hesabınız için yeni bir şifre belirleyin." : "Choose a new password for your account."}</p>
+            <div className="mt-6 space-y-4">
+              <Input id="current-password" type="password" autoComplete="current-password" label={language === "tr" ? "Mevcut şifre" : "Current password"} value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required />
+              <Input id="new-password" type="password" autoComplete="new-password" label={language === "tr" ? "Yeni şifre" : "New password"} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required />
+              <Input id="new-password-again" type="password" autoComplete="new-password" label={language === "tr" ? "Yeni şifre tekrar" : "Confirm new password"} value={newPasswordAgain} onChange={(event) => setNewPasswordAgain(event.target.value)} required />
+            </div>
+            <p className="mt-4 rounded-xl bg-gray-50 p-3 text-sm leading-6 text-gray-600">Şifre değiştirme işlemi backend tarafından henüz desteklenmiyor.</p>
+            {modalError ? <p className="mt-4 text-sm text-red-600" role="alert">{modalError}</p> : null}
+            <div className="mt-6 flex justify-end gap-2"><Button variant="secondary" onClick={() => setModal(null)}>{t("cancel")}</Button><Button type="submit">{language === "tr" ? "Şifreyi Değiştir" : "Change Password"}</Button></div>
+          </form> : null}
+
+          {modal === "history" || modal === "materials" ? <div className="settings-modal-paper w-full max-w-sm p-6" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
             <h2 id="settings-modal-title" className="text-lg font-semibold text-gray-950">{t(modalContent[modal].title)}</h2>
             <p className="mt-2 text-sm leading-6 text-gray-500">{t(modalContent[modal].description)}</p>
-            <div className="mt-6 flex justify-end gap-2">
-              <Button variant="secondary" onClick={() => setModal(null)}>{t("cancel")}</Button>
-              <Button onClick={confirmModal} className={modal === "history" || modal === "materials" ? "bg-red-600 hover:bg-red-700 focus-visible:outline-red-600" : ""}>{t(modalContent[modal].confirm)}</Button>
-            </div>
-          </div>
+            <div className="mt-6 flex justify-end gap-2"><Button variant="secondary" onClick={() => setModal(null)}>{t("cancel")}</Button><Button onClick={confirmModal} className="bg-red-600 hover:bg-red-700 focus-visible:outline-red-600">{t(modalContent[modal].confirm)}</Button></div>
+          </div> : null}
         </div>
       ) : null}
     </div>

@@ -15,26 +15,33 @@ export default function DashboardShell() {
   const [documents, setDocuments] = useState<DocumentData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [greetingKey, setGreetingKey] = useState<"goodMorning" | "goodAfternoon" | "goodEvening" | "goodNight">("goodMorning");
+
+  useEffect(() => {
+    const hour = new Date().getHours();
+    setGreetingKey(hour >= 5 && hour < 12 ? "goodMorning" : hour >= 12 && hour < 18 ? "goodAfternoon" : hour >= 18 && hour < 23 ? "goodEvening" : "goodNight");
+  }, []);
 
   useEffect(() => {
     Promise.all([apiFetch<Course[]>("/courses/"), apiFetch<DocumentData[]>("/documents/")])
       .then(([courseItems, documentItems]) => { setCourses(courseItems); setDocuments(documentItems); })
-      .catch((cause) => { console.error(cause); setError(cause instanceof Error ? cause.message : language === "tr" ? "İşlem sırasında bir hata oluştu." : "Something went wrong."); })
+      .catch((cause) => { console.error(cause); setError(language === "tr" ? "Veriler şu anda yüklenemiyor." : "Data is currently unavailable."); })
       .finally(() => setLoading(false));
   }, [language]);
   return (
-    <div className="mx-auto max-w-7xl px-5 py-10 sm:px-8 sm:py-14">
-      <header className="animate-enter">
-        <p className="text-sm text-gray-500">{t("yourWorkspace")}</p>
-        <h1 className="mt-2 text-3xl font-semibold tracking-[-0.04em] text-gray-950 sm:text-4xl">{t("goodMorning")}</h1>
-        <p className="mt-3 text-base text-gray-500">{t("dashboardIntro")}</p>
+    <div className="dashboard-page">
+      <header className="dashboard-greeting animate-enter">
+        <div className="dashboard-glow" aria-hidden="true" />
+        <p className="dashboard-eyebrow">{t("yourWorkspace")}</p>
+        <h1>{t(greetingKey)}</h1>
+        <p className="dashboard-subtitle">{t("dashboardIntro")}</p>
       </header>
 
       <QuickActions />
 
-      {error ? <p className="mt-6 text-sm text-red-600" role="alert">{error}</p> : null}
+      {error ? <p className="dashboard-error" role="alert">{error}</p> : null}
 
-      <div className="mt-10 space-y-10">
+      <div>
         <RecentCourses courses={courses} documents={documents} loading={loading} />
         <RecentDocuments courses={courses} documents={documents} loading={loading} />
       </div>
