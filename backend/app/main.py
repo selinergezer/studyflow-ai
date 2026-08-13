@@ -21,6 +21,7 @@ from app.models.achievement import Achievement
 from app.models.event import Event
 from app.models.study_session import StudySession
 from app.models.notification import Notification
+from app.models.email_verification import EmailVerification
 
 # =========================
 # API ROUTERLARI

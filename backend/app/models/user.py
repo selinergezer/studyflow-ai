@@ -1,8 +1,7 @@
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, Boolean
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
-
 
 class User(Base):
     __tablename__ = "users"
@@ -27,6 +26,12 @@ class User(Base):
 
     password = Column(
         String,
+        nullable=False
+    )
+
+    email_verified = Column(
+        Boolean,
+        default=False,
         nullable=False
     )
 
