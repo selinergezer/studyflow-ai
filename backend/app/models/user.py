@@ -40,7 +40,7 @@ class User(Base):
         "Achievement",
         back_populates="user",
         cascade="all, delete-orphan"
-   )
+    )
 
     goals = relationship(
         "Goal",
@@ -51,4 +51,16 @@ class User(Base):
     events = relationship(
         "Event",
         back_populates="user"
+    )
+
+    study_sessions = relationship(
+        "StudySession",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+
+    notifications = relationship(
+        "Notification",
+        back_populates="user",
+        cascade="all, delete-orphan"
     )

@@ -9,8 +9,14 @@ from app.models.quiz import Quiz
 from app.models.quiz_attempt import QuizAttempt
 from app.models.flashcard import Flashcard
 from app.models.achievement import Achievement
+from app.models.study_session import StudySession
+from datetime import date, timedelta
+from collections import defaultdict
+
+from app.models.study_session import StudySession
 
 from app.core.security import get_current_user
+from datetime import datetime, timezone, timedelta
 
 
 router = APIRouter(
@@ -387,3 +393,178 @@ def get_course_stats(
         })
 
     return results
+
+@router.get("/weekly")
+def get_weekly_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    today = date.today()
+
+    # Pazartesi = haftanın başlangıcı
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6)
+
+    sessions = (
+        db.query(StudySession)
+        .filter(
+            StudySession.user_id == current_user.id,
+            StudySession.study_date >= week_start,
+            StudySession.study_date <= week_end
+        )
+        .all()
+    )
+
+    total_study_minutes = sum(
+        session.duration_minutes
+        for session in sessions
+    )
+
+    # Günlük çalışma süreleri
+    daily_minutes = {}
+
+    for i in range(7):
+        current_date = week_start + timedelta(days=i)
+
+        daily_minutes[str(current_date)] = sum(
+            session.duration_minutes
+            for session in sessions
+            if session.study_date == current_date
+        )
+
+    # Ders bazında çalışma süreleri
+    course_minutes = defaultdict(int)
+
+    for session in sessions:
+        course_minutes[session.course_id] += session.duration_minutes
+
+    most_studied_course = None
+
+    if course_minutes:
+
+        most_studied_course_id = max(
+            course_minutes,
+            key=course_minutes.get
+        )
+
+        course = (
+            db.query(Course)
+            .filter(
+                Course.id == most_studied_course_id,
+                Course.user_id == current_user.id
+            )
+            .first()
+        )
+
+        if course:
+            most_studied_course = {
+                "course_id": course.id,
+                "course_name": course.name,
+                "minutes": course_minutes[course.id]
+            }
+
+    return {
+        "week_start": week_start,
+        "week_end": week_end,
+        "total_study_minutes": total_study_minutes,
+        "total_study_hours": round(
+            total_study_minutes / 60,
+            2
+        ),
+        "study_sessions": len(sessions),
+        "most_studied_course": most_studied_course,
+        "daily_minutes": daily_minutes
+    }
+
+# ============================================================
+# ÇALIŞMA SERİSİ (STREAK)
+# ============================================================
+
+@router.get("/streak")
+def get_streak(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+
+    sessions = (
+        db.query(StudySession.study_date)
+        .filter(
+            StudySession.user_id == current_user.id
+        )
+        .distinct()
+        .order_by(
+            StudySession.study_date.desc()
+        )
+        .all()
+    )
+
+    study_dates = [
+        session.study_date
+        for session in sessions
+    ]
+
+    if not study_dates:
+        return {
+            "current_streak": 0,
+            "longest_streak": 0
+        }
+
+    # ========================================================
+    # CURRENT STREAK
+    # ========================================================
+
+    today = datetime.now(timezone.utc).date()
+
+    date_set = set(study_dates)
+
+    # Kullanıcı bugün çalışmadıysa,
+    # dün çalıştıysa seri dünden devam eder.
+    if today in date_set:
+        current_date = today
+
+    elif (today - timedelta(days=1)) in date_set:
+        current_date = today - timedelta(days=1)
+
+    else:
+        current_date = None
+
+    current_streak = 0
+
+    if current_date is not None:
+
+        while current_date in date_set:
+
+            current_streak += 1
+
+            current_date = (
+                current_date - timedelta(days=1)
+            )
+
+    # ========================================================
+    # LONGEST STREAK
+    # ========================================================
+
+    longest_streak = 0
+    running_streak = 0
+    previous_date = None
+
+    for study_date in sorted(date_set):
+
+        if (
+            previous_date is not None
+            and study_date == previous_date + timedelta(days=1)
+        ):
+            running_streak += 1
+
+        else:
+            running_streak = 1
+
+        if running_streak > longest_streak:
+            longest_streak = running_streak
+
+        previous_date = study_date
+
+    return {
+        "current_streak": current_streak,
+        "longest_streak": longest_streak
+    }
