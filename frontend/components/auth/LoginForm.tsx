@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ApiError,
+  apiErrorMessage,
   publicApiFetch,
 } from "@/lib/api";
 import { useLanguage } from "@/providers/LanguageProvider";
@@ -51,8 +52,13 @@ export default function LoginForm() {
   }
 
   function showRequestError(cause: unknown) {
-    console.error(cause);
-    setError(cause instanceof ApiError ? cause.message : t("authOperationUnavailable"));
+    setError(
+      apiErrorMessage(
+        cause,
+        t("authOperationUnavailable"),
+        t("authOperationUnavailable"),
+      ),
+    );
   }
 
   async function login() {

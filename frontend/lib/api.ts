@@ -1,9 +1,31 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    public kind: "http" | "network" | "abort" = "http",
+  ) {
     super(message);
+    this.name = "ApiError";
   }
+}
+
+export function isAbortError(cause: unknown) {
+  return (
+    (cause instanceof ApiError && cause.kind === "abort") ||
+    (cause instanceof Error && cause.name === "AbortError")
+  );
+}
+
+function isNetworkError(cause: unknown) {
+  return (
+    cause instanceof TypeError ||
+    (cause instanceof Error &&
+      /load failed|failed to fetch|networkerror|network request failed/i.test(
+        cause.message,
+      ))
+  );
 }
 
 export function getToken() {
@@ -19,10 +41,9 @@ export function errorMessage(status: number, fallback?: string) {
 }
 
 export function apiErrorMessage(cause: unknown, fallback = "İşlem sırasında bir hata oluştu.", networkFallback = "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin.") {
-  if (cause instanceof ApiError) return cause.message;
-  if (cause instanceof TypeError || (cause instanceof Error && /load failed|failed to fetch|networkerror/i.test(cause.message))) {
-    return networkFallback;
-  }
+  if (cause instanceof ApiError)
+    return cause.kind === "network" ? networkFallback : cause.message;
+  if (isNetworkError(cause)) return networkFallback;
   return cause instanceof Error ? cause.message : fallback;
 }
 
@@ -37,12 +58,26 @@ async function responseError(response: Response) {
   return new ApiError(response.status, errorMessage(response.status, detail));
 }
 
+async function safeFetch(path: string, init: RequestInit) {
+  try {
+    return await fetch(`${API_URL}${path}`, init);
+  } catch (cause) {
+    if (isAbortError(cause)) {
+      throw new ApiError(0, "Request aborted", "abort");
+    }
+    if (isNetworkError(cause)) {
+      throw new ApiError(0, "Network request failed", "network");
+    }
+    throw cause;
+  }
+}
+
 export async function publicApiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData) && !(init.body instanceof URLSearchParams) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(`${API_URL}${path}`, { ...init, headers });
+  const response = await safeFetch(path, { ...init, headers });
   if (!response.ok) throw await responseError(response);
   return response.json() as Promise<T>;
 }
@@ -53,7 +88,7 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
   if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const response = await fetch(`${API_URL}${path}`, { ...init, headers });
+  const response = await safeFetch(path, { ...init, headers });
   if (!response.ok) {
     const error = await responseError(response);
     if (response.status === 401) {

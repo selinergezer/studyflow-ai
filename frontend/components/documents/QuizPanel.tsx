@@ -40,7 +40,7 @@ export default function QuizPanel({ documentId, initialQuiz, initialResult, onQu
   async function generateQuiz() {
     setBusy(true); setError(null); setWarning(null); setResult(null); setAnswers({}); setCurrentIndex(0);
     try { const created = await apiFetch<Quiz>(`/quizzes/generate?document_id=${documentId}&question_count=${questionCount}&difficulty=${difficulty}`, { method: "POST" }); setQuiz(created); onQuizCreated?.(created); }
-    catch (cause) { console.error(cause); setError(tr ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Data is currently unavailable. Please try again later."); }
+    catch { setError(tr ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Data is currently unavailable. Please try again later."); }
     finally { setBusy(false); }
   }
 
@@ -55,7 +55,7 @@ export default function QuizPanel({ documentId, initialQuiz, initialResult, onQu
     }
     setBusy(true); setWarning(null); setError(null);
     try { setResult(await apiFetch<QuizResult>(`/quizzes/${quiz.quiz_id ?? quiz.id}/submit`, { method: "POST", body: JSON.stringify({ answers: quiz.questions.map((question) => ({ question_id: question.id, answer: answers[question.id] })) }) })); }
-    catch (cause) { console.error(cause); setError(tr ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Data is currently unavailable. Please try again later."); }
+    catch { setError(tr ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Data is currently unavailable. Please try again later."); }
     finally { setBusy(false); }
   }
 

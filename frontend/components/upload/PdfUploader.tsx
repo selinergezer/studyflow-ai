@@ -14,6 +14,7 @@ import { useLanguage } from "@/providers/LanguageProvider";
 import {
   apiErrorMessage,
   apiFetch,
+  isAbortError,
   type Course,
   type DocumentData,
 } from "@/lib/api";
@@ -35,7 +36,11 @@ function formatBytes(bytes: number) {
     : `${Math.ceil(bytes / 1024)} KB`;
 }
 
-export default function PdfUploader() {
+export default function PdfUploader({
+  initialCourseId,
+}: {
+  initialCourseId?: number;
+}) {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -61,26 +66,32 @@ export default function PdfUploader() {
   const { t } = useLanguage();
 
   useEffect(() => {
-    apiFetch<Course[]>("/courses/")
+    const controller = new AbortController();
+    apiFetch<Course[]>("/courses/", { signal: controller.signal })
       .then((result) => {
         setCourses(result);
 
-        if (result[0]) {
-          setCourseId(String(result[0].id));
+        const contextualCourse = result.find(
+          (course) => course.id === initialCourseId,
+        );
+        const defaultCourse = contextualCourse ?? result[0];
+
+        if (defaultCourse) {
+          setCourseId(String(defaultCourse.id));
         }
       })
       .catch((cause) => {
-        console.error(cause);
+        if (isAbortError(cause)) return;
         setError(apiErrorMessage(cause));
       });
 
-    apiFetch<DocumentData[]>("/documents/")
+    apiFetch<DocumentData[]>("/documents/", { signal: controller.signal })
       .then((result) => {
         setDocuments(result);
         setDocumentsReady(true);
       })
       .catch((cause) => {
-        console.error(cause);
+        if (isAbortError(cause)) return;
 
         setError(
           apiErrorMessage(
@@ -90,7 +101,12 @@ export default function PdfUploader() {
           ),
         );
       });
-  }, []);
+    return () => controller.abort();
+  }, [initialCourseId]);
+
+  const selectedCourse = courses.find(
+    (course) => String(course.id) === courseId,
+  );
 
   function normalizedFilename(filename: string) {
     return filename.trim().toLocaleLowerCase("tr-TR");
@@ -199,8 +215,6 @@ export default function PdfUploader() {
 
       router.push(`/documents/${document.document_id}`);
     } catch (cause) {
-      console.error(cause);
-
       setError(
         apiErrorMessage(
           cause,
@@ -241,7 +255,6 @@ export default function PdfUploader() {
       setCourseDescription("");
       setShowCourseForm(false);
     } catch (cause) {
-      console.error(cause);
       setCourseError(
         apiErrorMessage(
           cause,
@@ -327,6 +340,12 @@ export default function PdfUploader() {
             >
               Kurs
             </label>
+
+            {selectedCourse ? (
+              <p className="upload-selected-course">
+                {t("uploadSelectedCourse", { course: selectedCourse.name })}
+              </p>
+            ) : null}
 
             <div className="upload-course-picker">
               <select
@@ -426,7 +445,7 @@ export default function PdfUploader() {
             </div>
           ) : (
             /* PDF seçildiyse */
-            <div className="flex min-h-[220px] items-center justify-center rounded-lg border border-dashed border-[#241f13]/20 bg-[#fffdf8]/25 p-6">
+            <div className="upload-selected-file flex min-h-[220px] items-center justify-center rounded-lg border border-dashed border-[#241f13]/20 bg-[#fffdf8]/25 p-6">
               <div className="flex w-full max-w-2xl items-center gap-4 rounded-lg border border-[#241f13]/15 bg-[#fffdf8]/55 p-5 shadow-sm">
                 <div className="flex size-14 shrink-0 items-center justify-center rounded-lg bg-[#e0786e]/15 font-mono text-xs font-bold text-[#bd564d]">
                   PDF

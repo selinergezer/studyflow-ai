@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiErrorMessage, apiFetch, type Course, type DocumentData } from "@/lib/api";
+import { apiErrorMessage, apiFetch, isAbortError, type Course, type DocumentData } from "@/lib/api";
 import { useLanguage } from "@/providers/LanguageProvider";
 
 export default function CoursesView() {
@@ -19,13 +19,24 @@ export default function CoursesView() {
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
   useEffect(() => {
-    Promise.all([apiFetch<Course[]>("/courses/"), apiFetch<DocumentData[]>("/documents/")])
-      .then(([courseItems, documentItems]) => { setCourses(courseItems); setDocuments(documentItems); })
+    const controller = new AbortController();
+    Promise.all([
+      apiFetch<Course[]>("/courses/", { signal: controller.signal }),
+      apiFetch<DocumentData[]>("/documents/", { signal: controller.signal }),
+    ])
+      .then(([courseItems, documentItems]) => {
+        setCourses(courseItems);
+        setDocuments(documentItems);
+        setError(null);
+      })
       .catch((cause) => {
-        console.error(cause);
+        if (isAbortError(cause)) return;
         setError(apiErrorMessage(cause, "Kurslar yüklenirken bir hata oluştu.", "Kurslar şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin."));
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
   }, []);
 
   function openCourseForm() {
@@ -44,7 +55,6 @@ export default function CoursesView() {
       setDescription("");
       setShowForm(false);
     } catch (cause) {
-      console.error(cause);
       setError(apiErrorMessage(cause, "Kurs oluşturulamadı.", "Kurslar şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin."));
     } finally {
       setCreating(false);

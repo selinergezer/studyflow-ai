@@ -39,8 +39,7 @@ export default function FlashcardStudy({ cards, onBack }: { cards: Flashcard[]; 
         setCurrentIndex((value) => value + 1);
         setIsFlipped(false);
       }
-    } catch (cause) {
-      console.error(cause);
+    } catch {
       setError(tr ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Data is currently unavailable. Please try again later.");
     } finally {
       setSaving(false);

@@ -10,6 +10,7 @@ import { useLanguage } from "@/providers/LanguageProvider";
 import {
   apiErrorMessage,
   apiFetch,
+  isAbortError,
   type Course,
   type DocumentData,
 } from "@/lib/api";
@@ -24,8 +25,20 @@ type StudySession = {
   description: string | null;
 };
 
-async function fetchTotalStudyMinutes() {
-  const sessions = await apiFetch<StudySession[]>("/study-sessions/");
+type DashboardErrors = {
+  courses: string | null;
+  documents: string | null;
+  sessions: string | null;
+};
+
+const emptyDashboardErrors: DashboardErrors = {
+  courses: null,
+  documents: null,
+  sessions: null,
+};
+
+async function fetchTotalStudyMinutes(signal?: AbortSignal) {
+  const sessions = await apiFetch<StudySession[]>("/study-sessions/", { signal });
   return sessions.reduce(
     (total, session) => total + session.duration_minutes,
     0,
@@ -47,7 +60,7 @@ export default function DashboardShell() {
 
   const [loading, setLoading] = useState(true);
   const [statsLoading, setStatsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<DashboardErrors>(emptyDashboardErrors);
   const [studyModalOpen, setStudyModalOpen] = useState(false);
   const [selectedCourseId, setSelectedCourseId] = useState("");
   const [studyDate, setStudyDate] = useState("");
@@ -71,30 +84,59 @@ export default function DashboardShell() {
   });
 
   useEffect(() => {
-    Promise.all([
-      apiFetch<Course[]>("/courses/"),
-      apiFetch<DocumentData[]>("/documents/"),
-      fetchTotalStudyMinutes(),
-    ])
-      .then(([courseItems, documentItems, studyMinutesTotal]) => {
-        setCourses(courseItems);
-        setDocuments(documentItems);
-        setTotalStudyMinutes(studyMinutesTotal);
-      })
-      .catch((cause) => {
-        console.error(cause);
-        setError(
-          apiErrorMessage(
-            cause,
-            translations[language].genericError,
-            translations[language].operationUnavailable,
-          ),
+    let cancelled = false;
+    const controller = new AbortController();
+
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setErrors(emptyDashboardErrors);
+      setLoading(true);
+      setStatsLoading(true);
+    });
+
+    Promise.allSettled([
+      apiFetch<Course[]>("/courses/", { signal: controller.signal }),
+      apiFetch<DocumentData[]>("/documents/", { signal: controller.signal }),
+      fetchTotalStudyMinutes(controller.signal),
+    ]).then(([courseResult, documentResult, sessionResult]) => {
+      if (cancelled) return;
+
+      const messageFor = (cause: unknown) => {
+        return apiErrorMessage(
+          cause,
+          translations[language].genericError,
+          translations[language].operationUnavailable,
         );
-      })
-      .finally(() => {
+      };
+
+      if (courseResult.status === "fulfilled") {
+        setCourses(courseResult.value);
+      }
+
+      if (documentResult.status === "fulfilled") {
+        setDocuments(documentResult.value);
+      }
+
+      if (sessionResult.status === "fulfilled") {
+        setTotalStudyMinutes(sessionResult.value);
+      }
+
+      setErrors({
+        courses: courseResult.status === "rejected" ? messageFor(courseResult.reason) : null,
+        documents: documentResult.status === "rejected" ? messageFor(documentResult.reason) : null,
+        sessions: sessionResult.status === "rejected" ? messageFor(sessionResult.reason) : null,
+      });
+
+      if (!cancelled) {
         setLoading(false);
         setStatsLoading(false);
-      });
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [language]);
 
   useEffect(() => {
@@ -164,15 +206,21 @@ export default function DashboardShell() {
       try {
         const updatedTotal = await fetchTotalStudyMinutes();
         setTotalStudyMinutes(updatedTotal);
+        setErrors((current) => ({ ...current, sessions: null }));
         setStudyStatus(t("studySessionSaved"));
       } catch (statsCause) {
-        console.error(statsCause);
-        setError(
-          t("studySessionRefreshFailed"),
-        );
+        if (isAbortError(statsCause)) return;
+        setErrors((current) => ({
+          ...current,
+          sessions: apiErrorMessage(
+            statsCause,
+            t("studySessionRefreshFailed"),
+            t("operationUnavailable"),
+          ),
+        }));
       }
     } catch (cause) {
-      console.error(cause);
+      if (isAbortError(cause)) return;
       setStudyError(
         apiErrorMessage(cause, t("studySessionFailed"), t("operationUnavailable")),
       );
@@ -180,6 +228,8 @@ export default function DashboardShell() {
       setStudySubmitting(false);
     }
   }
+
+  const error = errors.courses ?? errors.documents ?? errors.sessions;
 
   return (
     <div className="dashboard-page">

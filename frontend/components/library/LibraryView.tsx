@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   apiErrorMessage,
   apiFetch,
+  isAbortError,
   type Course,
   type DocumentData,
 } from "@/lib/api";
@@ -31,16 +32,18 @@ export default function LibraryView({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    const controller = new AbortController();
     Promise.all([
-      apiFetch<DocumentData[]>("/documents/"),
-      apiFetch<Course[]>("/courses/"),
+      apiFetch<DocumentData[]>("/documents/", { signal: controller.signal }),
+      apiFetch<Course[]>("/courses/", { signal: controller.signal }),
     ])
       .then(([documentItems, courseItems]) => {
         setDocuments(documentItems);
         setCourses(courseItems);
+        setError(null);
       })
       .catch((cause) => {
-        console.error(cause);
+        if (isAbortError(cause)) return;
 
         setError(
           apiErrorMessage(
@@ -50,7 +53,10 @@ export default function LibraryView({
           ),
         );
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
   }, []);
 
   const courseNames = useMemo(
@@ -127,8 +133,6 @@ export default function LibraryView({
         ),
       );
     } catch (cause) {
-      console.error(cause);
-
       setError(
         apiErrorMessage(
           cause,
@@ -168,7 +172,7 @@ export default function LibraryView({
         </div>
 
         <Link
-          href="/upload"
+          href={courseId != null ? `/upload?courseId=${courseId}` : "/upload"}
           className="library-add-button"
         >
           <svg

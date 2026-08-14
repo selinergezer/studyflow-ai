@@ -8,6 +8,7 @@ import Button from "@/components/ui/Button";
 import {
   apiErrorMessage,
   apiFetch,
+  isAbortError,
   type DocumentData,
   type Flashcard,
   type Quiz,
@@ -51,8 +52,9 @@ export default function ApiCollectionView({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    const controller = new AbortController();
     function handleError(cause: unknown) {
-      console.error(cause);
+      if (isAbortError(cause)) return;
 
       setError(quizMode
         ? (language === "tr" ? "Sınavlar şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Quizzes are currently unavailable. Please try again later.")
@@ -61,8 +63,8 @@ export default function ApiCollectionView({
 
     if (quizMode) {
       Promise.all([
-        apiFetch<Quiz[]>("/quizzes/"),
-        apiFetch<DocumentData[]>("/documents/"),
+        apiFetch<Quiz[]>("/quizzes/", { signal: controller.signal }),
+        apiFetch<DocumentData[]>("/documents/", { signal: controller.signal }),
       ])
         .then(async ([quizData, documentData]) => {
           const uniqueQuizzes = [
@@ -75,10 +77,10 @@ export default function ApiCollectionView({
           const quizzesWithCounts = await Promise.all(uniqueQuizzes.map(async (quiz) => {
             if (quiz.id == null || quiz.question_count != null) return quiz;
             try {
-              const detail = await apiFetch<Quiz>(`/quizzes/${quiz.id}`);
+              const detail = await apiFetch<Quiz>(`/quizzes/${quiz.id}`, { signal: controller.signal });
               return { ...quiz, question_count: detail.questions?.length ?? 0 };
             } catch (cause) {
-              console.error(cause);
+              if (isAbortError(cause)) throw cause;
               return quiz;
             }
           }));
@@ -91,21 +93,26 @@ export default function ApiCollectionView({
           }
         })
         .catch(handleError)
-        .finally(() => setLoading(false));
+        .finally(() => {
+          if (!controller.signal.aborted) setLoading(false);
+        });
 
-      return;
+      return () => controller.abort();
     }
 
     Promise.all([
-      apiFetch<Flashcard[]>("/flashcards/"),
-      apiFetch<DocumentData[]>("/documents/"),
+      apiFetch<Flashcard[]>("/flashcards/", { signal: controller.signal }),
+      apiFetch<DocumentData[]>("/documents/", { signal: controller.signal }),
     ])
       .then(([flashcardData, documentData]) => {
         setFlashcards(flashcardData);
         setDocuments(documentData);
       })
       .catch(handleError)
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
   }, [quizMode, language]);
 
   const quizDocuments = useMemo(() => {
@@ -180,8 +187,7 @@ export default function ApiCollectionView({
       setQuestionCount(10);
       setDifficulty("medium");
       router.push(`/quiz/${quizId}?document_id=${selectedDocumentId}`);
-    } catch (cause) {
-      console.error(cause);
+    } catch {
       setError("Sınav oluşturulamadı. Lütfen tekrar deneyin.");
     } finally {
       setCreatingQuiz(false);
@@ -212,7 +218,6 @@ export default function ApiCollectionView({
         deletedIds.push(card.id);
       }
     } catch (cause) {
-      console.error(cause);
       setError(apiErrorMessage(cause, "Bilgi kartları silinirken bir hata oluştu."));
     } finally {
       if (deletedIds.length) {

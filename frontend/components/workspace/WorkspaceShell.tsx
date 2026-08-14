@@ -10,7 +10,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 
 import { useLanguage } from "@/providers/LanguageProvider";
-import { apiFetch, type CurrentUser } from "@/lib/api";
+import { apiFetch, isAbortError, type CurrentUser } from "@/lib/api";
 
 type NotificationData = {
   id: number;
@@ -95,6 +95,7 @@ export default function WorkspaceShell({
   // =========================================================
 
   useEffect(() => {
+    const controller = new AbortController();
     function handleExpiredSession() {
       setIsAuthenticated(false);
       router.replace("/login");
@@ -118,14 +119,15 @@ export default function WorkspaceShell({
         return;
       }
 
-      apiFetch<CurrentUser>("/users/me")
+      apiFetch<CurrentUser>("/users/me", { signal: controller.signal })
         .then(setUser)
         .catch((cause) => {
-          console.error(cause);
+          if (isAbortError(cause)) return;
         });
     });
 
     return () => {
+      controller.abort();
       window.removeEventListener(
         "studyflow-auth-expired",
         handleExpiredSession,
@@ -176,7 +178,7 @@ export default function WorkspaceShell({
   // BİLDİRİMLERİ YÜKLE
   // =========================================================
 
-  async function loadNotifications() {
+  async function loadNotifications(signal?: AbortSignal) {
     try {
       setNotificationsLoading(true);
 
@@ -184,29 +186,29 @@ export default function WorkspaceShell({
         await Promise.all([
           apiFetch<NotificationData[]>(
             "/notifications/",
+            { signal },
           ),
 
           apiFetch<{ unread_count: number }>(
             "/notifications/unread-count",
+            { signal },
           ),
         ]);
 
       setNotifications(notificationData);
       setUnreadCount(countData.unread_count);
     } catch (error) {
-      console.error(
-        "Bildirimler yüklenemedi:",
-        error,
-      );
+      if (isAbortError(error)) return;
     } finally {
-      setNotificationsLoading(false);
+      if (!signal?.aborted) setNotificationsLoading(false);
     }
   }
 
   useEffect(() => {
     if (!isAuthenticated) return;
-
-    loadNotifications();
+    const controller = new AbortController();
+    queueMicrotask(() => loadNotifications(controller.signal));
+    return () => controller.abort();
   }, [isAuthenticated]);
 
   // =========================================================
@@ -240,12 +242,7 @@ export default function WorkspaceShell({
       setUnreadCount((current) =>
         Math.max(0, current - 1),
       );
-    } catch (error) {
-      console.error(
-        "Bildirim okunamadı:",
-        error,
-      );
-    }
+    } catch {}
   }
 
   // =========================================================
@@ -274,12 +271,7 @@ export default function WorkspaceShell({
           Math.max(0, current - 1),
         );
       }
-    } catch (error) {
-      console.error(
-        "Bildirim silinemedi:",
-        error,
-      );
-    }
+    } catch {}
   }
 
   // =========================================================
@@ -348,6 +340,14 @@ export default function WorkspaceShell({
         .toLocaleUpperCase("tr-TR")
     : "SF";
 
+  const pageModifier = pathname === "/dashboard"
+    ? " workspace-page--dashboard"
+    : pathname === "/library"
+      ? " workspace-page--library"
+      : pathname === "/upload"
+        ? " workspace-page--upload"
+        : "";
+
   // =========================================================
   // AUTH BEKLENİYOR
   // =========================================================
@@ -370,7 +370,7 @@ export default function WorkspaceShell({
 
   return (
     <main
-      className="workspace-page"
+      className={`workspace-page${pageModifier}`}
       data-workspace-theme={theme}
     >
       <header className="workspace-header">

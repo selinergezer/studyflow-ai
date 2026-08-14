@@ -5,7 +5,7 @@ import Button from "@/components/ui/Button";
 import MarkdownSummary from "@/components/documents/MarkdownSummary";
 import QuizPanel from "@/components/documents/QuizPanel";
 import FlashcardStudy from "@/components/documents/FlashcardStudy";
-import { apiFetch, type DocumentData, type Flashcard, type Quiz } from "@/lib/api";
+import { apiFetch, isAbortError, type DocumentData, type Flashcard, type Quiz } from "@/lib/api";
 import { useLanguage } from "@/providers/LanguageProvider";
 
 type Tab = "summary" | "quiz" | "flashcards";
@@ -25,31 +25,51 @@ export default function DocumentWorkspace({ documentId, initialTab = "summary" }
   const [loadingQuizId, setLoadingQuizId] = useState<number | null>(null);
 
   useEffect(() => {
-    apiFetch<DocumentData>(`/documents/${documentId}`).then(async (item) => {
-      const normalized = { ...item, document_id: item.document_id ?? item.id };
-      setDocument(normalized); localStorage.setItem("lastDocument", JSON.stringify(normalized));
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    async function loadDocument() {
       try {
-        const quizItems = await apiFetch<Quiz[]>("/quizzes/");
+        const item = await apiFetch<DocumentData>(`/documents/${documentId}`, { signal });
+        const normalized = { ...item, document_id: item.document_id ?? item.id };
+        setDocument(normalized);
+        localStorage.setItem("lastDocument", JSON.stringify(normalized));
+
+        const [quizResult, flashcardResult] = await Promise.allSettled([
+          apiFetch<Quiz[]>("/quizzes/", { signal }),
+          apiFetch<Flashcard[]>(`/flashcards/?course_id=${item.course_id}`, { signal }),
+        ]);
+        if (signal.aborted) return;
+
+        if (quizResult.status === "fulfilled") {
+          const quizItems = quizResult.value;
         const documentQuizzes = quizItems.filter((quiz) => quiz.document_id === Number(documentId));
         const detailedQuizzes = await Promise.all(documentQuizzes.map(async (quiz) => {
           if (quiz.id == null) return quiz;
-          try { const detail = await apiFetch<Quiz>(`/quizzes/${quiz.id}`); return { ...quiz, ...detail, question_count: detail.questions?.length ?? quiz.question_count }; }
-          catch (cause) { console.error(cause); return quiz; }
+            try { const detail = await apiFetch<Quiz>(`/quizzes/${quiz.id}`, { signal }); return { ...quiz, ...detail, question_count: detail.questions?.length ?? quiz.question_count }; }
+            catch (cause) { if (isAbortError(cause)) throw cause; return quiz; }
         }));
+          if (signal.aborted) return;
         setQuizzes(detailedQuizzes);
-      } catch (cause) {
-        console.error(cause);
+        } else if (!isAbortError(quizResult.reason) && initialTab === "quiz") {
         if (initialTab === "quiz") setError(language === "tr" ? "Sınavlar şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Quizzes are currently unavailable. Please try again later.");
       }
-      try {
-        const cards = await apiFetch<Flashcard[]>(`/flashcards/?course_id=${item.course_id}`);
-        setFlashcards(cards.filter((card) => card.document_id === Number(documentId)));
-      } catch (cause) {
-        console.error(cause);
+
+        if (flashcardResult.status === "fulfilled") {
+          setFlashcards(flashcardResult.value.filter((card) => card.document_id === Number(documentId)));
+        } else if (!isAbortError(flashcardResult.reason) && initialTab === "flashcards") {
         if (initialTab === "flashcards") setError(language === "tr" ? "Bilgi kartları şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Flashcards are currently unavailable. Please try again later.");
       }
-    }).catch((cause) => { console.error(cause); setError(language === "tr" ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Data is currently unavailable. Please try again later."); }).finally(() => setLoading(false));
-  }, [documentId, initialTab]);
+      } catch (cause) {
+        if (!isAbortError(cause)) setError(language === "tr" ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Data is currently unavailable. Please try again later.");
+      } finally {
+        if (!signal.aborted) setLoading(false);
+      }
+    }
+
+    void loadDocument();
+    return () => controller.abort();
+  }, [documentId, initialTab, language]);
 
   async function openQuiz(quiz: Quiz) {
     const quizId = quiz.id ?? quiz.quiz_id;
@@ -58,7 +78,7 @@ export default function DocumentWorkspace({ documentId, initialTab = "summary" }
     if (quiz.questions?.length) { setSelectedQuiz({ ...quiz }); return; }
     setLoadingQuizId(quizId);
     try { setSelectedQuiz(await apiFetch<Quiz>(`/quizzes/${quizId}`)); }
-    catch (cause) { console.error(cause); setError(language === "tr" ? "Sınav yüklenemedi. Lütfen tekrar deneyin." : "The quiz could not be loaded. Please try again."); }
+    catch (cause) { if (!isAbortError(cause)) setError(language === "tr" ? "Sınav yüklenemedi. Lütfen tekrar deneyin." : "The quiz could not be loaded. Please try again."); }
     finally { setLoadingQuizId(null); }
   }
 
@@ -69,7 +89,7 @@ export default function DocumentWorkspace({ documentId, initialTab = "summary" }
     setSelectedQuiz(normalized);
   }
 
-  function requestQuizDelete(event: React.MouseEvent, quiz: Quiz) {
+  function requestQuizDelete(event: React.MouseEvent, _quiz: Quiz) {
     event.preventDefault(); event.stopPropagation();
     if (!window.confirm(language === "tr" ? "Bu sınavı silmek istediğinize emin misiniz?" : "Are you sure you want to delete this quiz?")) return;
     setError(language === "tr" ? "Sınav silme işlemi backend tarafından henüz desteklenmiyor." : "Quiz deletion is not supported by the backend yet.");
@@ -79,7 +99,7 @@ export default function DocumentWorkspace({ documentId, initialTab = "summary" }
   async function generateFlashcards() {
     if (!document) return; setBusy("flashcards"); setError(null);
     try { const data = await apiFetch<{ flashcards: Flashcard[] }>(`/flashcards/generate?course_id=${document.course_id}&document_id=${documentId}&flashcard_count=${flashcardCount}`, { method: "POST" }); setFlashcards((current) => [...current.filter((card) => !data.flashcards.some((created) => created.id === card.id)), ...data.flashcards]); setActiveFlashcards(data.flashcards); }
-    catch (cause) { console.error(cause); setError(language === "tr" ? "Bilgi kartları şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Flashcards are currently unavailable. Please try again later."); }
+    catch (cause) { if (!isAbortError(cause)) setError(language === "tr" ? "Bilgi kartları şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Flashcards are currently unavailable. Please try again later."); }
     finally { setBusy(null); }
   }
 

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import QuizPanel from "@/components/documents/QuizPanel";
-import { apiFetch, type Quiz } from "@/lib/api";
+import { apiFetch, isAbortError, type Quiz } from "@/lib/api";
 import { useLanguage } from "@/providers/LanguageProvider";
 
 export default function QuizSolveView({ quizId, documentId }: { quizId: string; documentId?: string }) {
@@ -13,13 +13,17 @@ export default function QuizSolveView({ quizId, documentId }: { quizId: string; 
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    apiFetch<Quiz>(`/quizzes/${quizId}`)
-      .then(setQuiz)
+    const controller = new AbortController();
+    apiFetch<Quiz>(`/quizzes/${quizId}`, { signal: controller.signal })
+      .then((result) => { setQuiz(result); setError(null); })
       .catch((cause) => {
-        console.error(cause);
+        if (isAbortError(cause)) return;
         setError(language === "tr" ? "Sınav yüklenemedi. Lütfen tekrar deneyin." : "The quiz could not be loaded. Please try again.");
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
   }, [quizId, language]);
 
   const quizDocumentId = documentId ?? (quiz ? String(quiz.document_id) : undefined);
