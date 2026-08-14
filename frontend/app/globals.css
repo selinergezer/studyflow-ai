@@ -1098,6 +1098,17 @@ textarea {
 @media (max-width:720px) { .courses-page { padding:0 20px 50px; }.courses-heading { align-items:flex-start; flex-direction:column; }.courses-primary-button { align-self:flex-start; }.courses-form-paper form { grid-template-columns:1fr; }.courses-form-actions { grid-column:1; }.courses-grid { grid-template-columns:1fr; } }
 @media (prefers-reduced-motion:reduce) { .courses-glow { animation:none; } }
 
+/* Course workspace */
+.course-workspace-heading { position:relative; padding:34px 0 38px; }
+.course-workspace-back { position:relative; display:inline-block; margin-bottom:28px; color:#7fe0c4; font-family:var(--font-space-mono),monospace; font-size:11px; letter-spacing:.04em; }
+.course-workspace-back:hover { color:#9cebd5; }
+.course-workspace-title-row { position:relative; display:flex; align-items:flex-end; justify-content:space-between; gap:24px; }
+.course-workspace-title-row h1 { margin:0 0 10px; color:var(--ws-heading); font-family:var(--font-bricolage),sans-serif; font-size:clamp(34px,4vw,48px); font-weight:600; letter-spacing:-.01em; line-height:1.05; }
+.course-documents-title { margin:0 0 4px; color:var(--ws-heading); font-family:var(--font-bricolage),sans-serif; font-size:22px; font-weight:600; }
+.course-workspace .library-document-grid { margin-top:22px; }
+.course-workspace .library-document-card { display:block; text-decoration:none; }
+@media (max-width:720px) { .course-workspace-title-row { align-items:flex-start; flex-direction:column; }.course-workspace-heading { padding-top:28px; }.course-workspace .courses-primary-button { align-self:flex-start; } }
+
 /* Library page */
 .library-page { position:relative; z-index:1; max-width:1280px; margin:0 auto; padding:0 40px 40px; }
 .library-heading { position:relative; display:flex; align-items:flex-end; justify-content:space-between; gap:24px; padding:50px 0 34px; }

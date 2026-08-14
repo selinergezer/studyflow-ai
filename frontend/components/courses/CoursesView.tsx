@@ -87,7 +87,7 @@ export default function CoursesView() {
     {loading ? <p className="courses-loading">{t("loading")}</p> : <div className="courses-grid">
       {courses.map((course) => {
         const documentCount = documents.filter((document) => document.course_id === course.id).length;
-        return <article id={`course-${course.id}`} key={course.id} className="courses-card" role="link" tabIndex={0} onClick={() => router.push(`/library?course_id=${course.id}`)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") router.push(`/library?course_id=${course.id}`); }}>
+        return <article id={`course-${course.id}`} key={course.id} className="courses-card" role="link" tabIndex={0} onClick={() => router.push(`/courses/${course.id}`)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); router.push(`/courses/${course.id}`); } }}>
           <span className="courses-card-flag" aria-hidden="true" />
           <div className="courses-card-top"><span className="courses-card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span><button type="button" className="courses-delete" disabled={deletingId === course.id} onClick={(event) => deleteCourse(event, course.id)} aria-label={`${course.name} kursunu sil`}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg></button></div>
           <h2>{course.name}</h2>

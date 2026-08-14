@@ -37,7 +37,7 @@ export function RecentCourses({ courses, documents, loading }: DashboardSectionP
           {recentCourses.map((course) => {
             const count = documents.filter((document) => document.course_id === course.id).length;
             return (
-              <Link key={course.id} href={`/courses#course-${course.id}`} className="dashboard-course-card interactive-card">
+              <Link key={course.id} href={`/courses/${course.id}`} className="dashboard-course-card interactive-card">
                 <span className="dashboard-course-tag">{t("course")}</span>
                 <span className="dashboard-course-icon"><DashboardIcon name="book" /></span>
                 <h3>{course.name}</h3>
@@ -68,7 +68,7 @@ export function RecentDocuments({ courses, documents, loading }: DashboardSectio
     <section className="dashboard-section dashboard-panel dashboard-recent-documents" aria-labelledby="recent-documents-heading">
       <div className="dashboard-section-head">
         <h2 id="recent-documents-heading">{t("recentDocuments")}</h2>
-        <Link href="/library">{t("viewLibrary")} →</Link>
+        <Link href="/courses">{t("viewAll")} →</Link>
       </div>
       {loading ? <p className="dashboard-loading">{t("loading")}</p> : recentDocuments.length ? (
         <div className="dashboard-document-list">

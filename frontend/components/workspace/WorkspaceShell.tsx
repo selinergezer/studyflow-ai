@@ -24,11 +24,9 @@ type NotificationData = {
 const navigation = [
   { label: "dashboard", href: "/dashboard" },
   { label: "courses", href: "/courses" },
-  { label: "library", href: "/library" },
   { label: "quizzes", href: "/quiz" },
   { label: "flashcards", href: "/flashcards" },
   { label: "studyPlan", href: "/study-plan" },
-  { label: "settings", href: "/settings" },
 ] as const;
 
 export default function WorkspaceShell({
@@ -279,14 +277,6 @@ export default function WorkspaceShell({
   // =========================================================
 
   function isActive(href: string) {
-    if (href === "/library") {
-      return (
-        pathname === href ||
-        pathname === "/upload" ||
-        pathname.startsWith("/documents/")
-      );
-    }
-
     if (href === "/courses") {
       return (
         pathname === href ||
