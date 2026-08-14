@@ -3,13 +3,7 @@ from pydantic import BaseModel, Field
 from typing import List
 
 class PlannerRequest(BaseModel):
-    available_hours_per_day: float
-    target_gpa: float
-
-
-class PlannerRequest(BaseModel):
-    available_hours_per_day: float
-    target_gpa: float
+    available_hours_per_day: float = Field(gt=0, le=24)
 
 
 class StudyPlanItem(BaseModel):
@@ -18,11 +12,6 @@ class StudyPlanItem(BaseModel):
     duration_minutes: int
     topics: List[str] = Field(default_factory=list)
     reason: str
-
-
-class PlannerResponse(BaseModel):
-    weekly_plan: List[StudyPlanItem]
-    general_advice: str
 
 
 class PlannerResponse(BaseModel):

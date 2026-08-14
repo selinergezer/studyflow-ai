@@ -1,8 +1,9 @@
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from pydantic import BaseModel
 from typing import Optional
 import json
+import time
 from app.core.config import settings
 
 
@@ -554,12 +555,34 @@ class PlannerResponse(BaseModel):
     general_advice: str
 
 
+class PlannerServiceUnavailableError(Exception):
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__("Gemini planner service is temporarily unavailable.")
+
+
+def _transient_gemini_status(error: errors.APIError) -> Optional[int]:
+    code = getattr(error, "code", None)
+
+    if code in (429, 503):
+        return code
+
+    message = str(error).upper()
+
+    if "RESOURCE_EXHAUSTED" in message or "RATE LIMIT" in message:
+        return 429
+
+    if "UNAVAILABLE" in message:
+        return 503
+
+    return None
+
+
 def generate_study_plan(
     courses,
     events,
     goals,
     available_hours_per_day: float,
-    target_gpa: float,
     weekly_hours_target: float
 ):
 
@@ -677,9 +700,6 @@ Planlanması gereken haftalık çalışma süresi:
 {effective_weekly_target_minutes} dakika
 ({effective_weekly_target_hours} saat)
 
-Hedef GPA:
-{target_gpa}
-
 
 ==================================================
 ÖĞRENCİNİN DERSLERİ
@@ -761,52 +781,49 @@ PLANLAMA KURALLARI
 
 14. Aktif hedefleri dikkate al.
 
-15. Hedef GPA yüksekse çalışma dağılımını
-    buna göre yap.
+15. Dersleri mümkün olduğunca dengeli dağıt.
 
-16. Dersleri mümkün olduğunca dengeli dağıt.
+16. Aynı dersi gereksiz şekilde her güne koyma.
 
-17. Aynı dersi gereksiz şekilde her güne koyma.
-
-18. Ancak yaklaşan sınav veya önemli bir
+17. Ancak yaklaşan sınav veya önemli bir
     deadline varsa ilgili derse daha fazla
     çalışma süresi ayırabilirsin.
 
-19. Konu bilgisi verilmediği için konu
+18. Konu bilgisi verilmediği için konu
     uydurma.
 
-20. Output içinde topics alanı bulunmayacaktır.
+19. Output içinde topics alanı bulunmayacaktır.
 
-21. Her çalışma kaydının duration_minutes
+20. Her çalışma kaydının duration_minutes
     değeri gerçekçi olmalıdır.
 
-22. Çalışma süreleri dakika cinsinden olmalıdır.
+21. Çalışma süreleri dakika cinsinden olmalıdır.
 
-23. Her gün mutlaka çalışma kaydı oluşturmak
+22. Her gün mutlaka çalışma kaydı oluşturmak
     zorunda değilsin.
 
-24. Fakat 7 günlük plan içerisinde toplam
+23. Fakat 7 günlük plan içerisinde toplam
     çalışma süresini haftalık hedefe
     mümkün olduğunca tam olarak ulaştır.
 
-25. Tamamlanmış hedefleri dikkate alma.
+24. Tamamlanmış hedefleri dikkate alma.
 
-26. Tamamlanmış eventleri dikkate alma.
+25. Tamamlanmış eventleri dikkate alma.
 
-27. Verilmeyen bilgileri uydurma.
+26. Verilmeyen bilgileri uydurma.
 
-28. general_advice içerisinde yanlış bir
+27. general_advice içerisinde yanlış bir
     haftalık toplam süre belirtme.
 
-29. Planın toplam süresini hesaplarken
+28. Planın toplam süresini hesaplarken
     duration_minutes değerlerini dikkate al.
 
-30. Haftalık hedef:
+29. Haftalık hedef:
     {effective_weekly_target_minutes} dakika.
 
-31. Bu hedefi aşma.
+30. Bu hedefi aşma.
 
-32. Mümkünse bu hedefin altında da kalma.
+31. Mümkünse bu hedefin altında da kalma.
 
 
 ==================================================
@@ -852,14 +869,31 @@ kapasitesini aşmamalıdır.
     # GEMINI
     # ---------------------------------------------------------
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=PlannerResponse,
-        ),
-    )
+    maximum_attempts = 3
+
+    for attempt in range(1, maximum_attempts + 1):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=PlannerResponse,
+                ),
+            )
+            break
+        except errors.APIError as error:
+            transient_status = _transient_gemini_status(error)
+
+            if transient_status is None:
+                raise
+
+            if attempt == maximum_attempts:
+                raise PlannerServiceUnavailableError(
+                    transient_status
+                ) from error
+
+            time.sleep(2 ** (attempt - 1))
 
     # ---------------------------------------------------------
     # AI CEVABI KONTROL

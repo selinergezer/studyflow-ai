@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 
@@ -16,7 +16,10 @@ from app.schemas.planner import (
     PlannerResponse
 )
 
-from app.services.ai_service import generate_study_plan
+from app.services.ai_service import (
+    PlannerServiceUnavailableError,
+    generate_study_plan,
+)
 
 
 router = APIRouter(
@@ -110,13 +113,21 @@ def create_study_plan(
     # AI PLAN OLUŞTUR
     # -----------------------------------------------------
 
-    result = generate_study_plan(
-        courses=courses,
-        events=events,
-        goals=goals,
-        available_hours_per_day=request.available_hours_per_day,
-        target_gpa=request.target_gpa,
-        weekly_hours_target=weekly_hours_target
-    )
+    try:
+        result = generate_study_plan(
+            courses=courses,
+            events=events,
+            goals=goals,
+            available_hours_per_day=request.available_hours_per_day,
+            weekly_hours_target=weekly_hours_target
+        )
+    except PlannerServiceUnavailableError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=(
+                "Yapay zeka servisi şu anda yoğun. "
+                "Lütfen kısa bir süre sonra tekrar deneyin."
+            ),
+        ) from error
 
     return result
