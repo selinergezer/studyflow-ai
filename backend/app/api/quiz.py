@@ -82,14 +82,17 @@ def generate_quiz_endpoint(
     for generated_question in generated_quiz.questions:
 
         question = Question(
-            option_a=generated_question.option_a,
-            option_b=generated_question.option_b,
-            option_c=generated_question.option_c,
-            option_d=generated_question.option_d,
-            option_e=generated_question.option_e,
-            correct_answer=generated_question.correct_answer,
-            explanation=generated_question.explanation
-        )
+    quiz_id=quiz.id,
+    question_type=generated_question.question_type,
+    question_text=generated_question.question_text,
+    option_a=generated_question.option_a,
+    option_b=generated_question.option_b,
+    option_c=generated_question.option_c,
+    option_d=generated_question.option_d,
+    option_e=generated_question.option_e,
+    correct_answer=generated_question.correct_answer,
+    explanation=generated_question.explanation
+)
 
         db.add(question)
         questions.append(question)

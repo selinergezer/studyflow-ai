@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     SECRET_KEY: str
 
     GEMINI_API_KEY: str
+    OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
+    OLLAMA_MODEL: str = "qwen2.5:7b"
 
     SMTP_HOST: str
     SMTP_PORT: int
