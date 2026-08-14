@@ -10,7 +10,7 @@ type AuthMode = "login" | "register";
 
 export default function LoginForm() {
   const router = useRouter();
-  const { t, language } = useLanguage();
+  const { language } = useLanguage();
   const [mode, setMode] = useState<AuthMode>("login");
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
@@ -67,13 +67,13 @@ export default function LoginForm() {
 
   return (
     <div className="auth-notebook">
-      <div className="auth-punch-row" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <span key={index} />)}</div>
+      <div className="auth-punch-row" aria-hidden="true">{Array.from({ length: 5 }, (_, index) => <span key={index} />)}</div>
       <div className="auth-paper">
-        <span className="auth-active-mark">AKTİF</span>
+        <span className="auth-active-mark">{language === "tr" ? "AÇIK" : "OPEN"}</span>
         <div className="auth-paper-content">
           <p className="auth-form-kicker">{language === "tr" ? "StudyFlow Hesabı" : "StudyFlow Account"}</p>
-          <h2>{t("learningReady")}</h2>
-          <p className="auth-form-description">{t("learningReadyDesc")}</p>
+          <h2>{language === "tr" ? "Öğrenme alanın hazır." : "Your learning space is ready."}</h2>
+          <p className="auth-form-description">{language === "tr" ? "Notlarını düzenle, çalışma materyallerini keşfet ve hedeflerine kaldığın yerden devam et." : "Organize your notes, explore study materials, and continue working toward your goals."}</p>
         </div>
 
         <div className="auth-tabs" role="tablist" aria-label={language === "tr" ? "Kimlik doğrulama" : "Authentication"}>

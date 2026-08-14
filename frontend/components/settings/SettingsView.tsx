@@ -89,6 +89,7 @@ export default function SettingsView() {
   const router = useRouter();
   const [theme, setTheme] = useTheme();
   const { language, setLanguage, t } = useLanguage();
+  const operationUnavailable = t("operationUnavailable");
   const [studyReminders, setStudyReminders] = useState(true);
   const [quizReminders, setQuizReminders] = useState(true);
   const [modal, setModal] = useState<Modal>(null);
@@ -109,9 +110,9 @@ export default function SettingsView() {
       .then(setUser)
       .catch((cause) => {
         console.error(cause);
-        setAccountError(apiErrorMessage(cause, language === "tr" ? "Hesap bilgileri yüklenemedi." : "Account details could not be loaded.", "İşlem şu anda gerçekleştirilemiyor. Lütfen daha sonra tekrar deneyin."));
+        setAccountError(apiErrorMessage(cause, language === "tr" ? "Hesap bilgileri yüklenemedi." : "Account details could not be loaded.", operationUnavailable));
       });
-  }, [language]);
+  }, [language, operationUnavailable]);
 
   function openProfileModal() {
     setProfileUsername(user?.username ?? "");
@@ -168,11 +169,11 @@ export default function SettingsView() {
   function submitPassword(event: React.FormEvent) {
     event.preventDefault();
     if (!currentPassword || !newPassword || !newPasswordAgain) {
-      setModalError("Tüm şifre alanlarını doldurun.");
+      setModalError(t("fillAllPasswordFields"));
       return;
     }
     if (newPassword !== newPasswordAgain) {
-      setModalError("Yeni şifreler eşleşmiyor.");
+      setModalError(t("passwordsDoNotMatch"));
       return;
     }
     setModalError(null);
@@ -194,7 +195,7 @@ export default function SettingsView() {
         <div className="settings-glow" aria-hidden="true" />
         <p className="settings-eyebrow">{t("settings")}</p>
         <h1>{t("settings")}</h1>
-        <p>{language === "tr" ? "Hesabını ve uygulama tercihlerini buradan yönet." : "Manage your account and application preferences here."}</p>
+        <p>{t("settingsIntro")}</p>
       </header>
 
       <div className="settings-sections">
@@ -280,7 +281,7 @@ export default function SettingsView() {
               <Input id="new-password" type="password" autoComplete="new-password" label={language === "tr" ? "Yeni şifre" : "New password"} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required />
               <Input id="new-password-again" type="password" autoComplete="new-password" label={language === "tr" ? "Yeni şifre tekrar" : "Confirm new password"} value={newPasswordAgain} onChange={(event) => setNewPasswordAgain(event.target.value)} required />
             </div>
-            <p className="mt-4 rounded-xl bg-gray-50 p-3 text-sm leading-6 text-gray-600">Şifre değiştirme işlemi backend tarafından henüz desteklenmiyor.</p>
+            <p className="mt-4 rounded-xl bg-gray-50 p-3 text-sm leading-6 text-gray-600">{t("passwordChangeUnsupported")}</p>
             {modalError ? <p className="mt-4 text-sm text-red-600" role="alert">{modalError}</p> : null}
             <div className="mt-6 flex justify-end gap-2"><Button variant="secondary" onClick={() => setModal(null)}>{t("cancel")}</Button><Button type="submit">{language === "tr" ? "Şifreyi Değiştir" : "Change Password"}</Button></div>
           </form> : null}

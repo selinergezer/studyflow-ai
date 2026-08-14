@@ -255,7 +255,7 @@ export default function PdfUploader() {
   }
 
   return (
-    <div className="relative mx-auto max-w-5xl px-5 py-14 sm:px-8 sm:py-16">
+    <div className="upload-page relative mx-auto max-w-5xl px-5 sm:px-8">
       {/* Glow */}
       <div
         className="pointer-events-none absolute -left-52 -top-40 h-[560px] w-[560px]"
@@ -266,7 +266,7 @@ export default function PdfUploader() {
       />
 
       {/* Başlık */}
-      <div className="relative mb-10">
+      <div className="upload-heading relative">
         <div className="mb-4 flex items-center gap-3 font-mono text-xs tracking-[0.14em] text-[#7fe0c4]">
           <span className="h-px w-6 bg-[#7fe0c4]" />
           MATERYALLER
@@ -306,9 +306,9 @@ export default function PdfUploader() {
         {/* Bant */}
         <div className="absolute -top-1 right-16 h-7 w-24 rotate-2 bg-[#7fe0c4]/70 shadow-sm" />
 
-        <div className="px-7 pb-8 pt-10 sm:px-12 sm:pb-10 sm:pl-[92px]">
+        <div className="upload-notebook-content px-7 sm:px-12 sm:pl-[92px]">
           {/* Küçük başlık */}
-          <div className="mb-8 max-w-2xl">
+          <div className="upload-preparation-copy max-w-2xl">
             <p className="font-mono text-[11px] font-bold tracking-[0.12em] text-[#7a6e4e]">
               MATERYAL HAZIRLA
             </p>
@@ -320,7 +320,7 @@ export default function PdfUploader() {
           </div>
 
           {/* Kurs */}
-          <div className="mb-8 max-w-2xl">
+          <div className="upload-course-section max-w-2xl">
             <label
               htmlFor="upload-course"
               className="mb-2 block font-mono text-[10px] uppercase tracking-[0.1em] text-[#8a7d55]"
@@ -380,7 +380,7 @@ export default function PdfUploader() {
               }}
               onDragLeave={() => setDragging(false)}
               onDrop={handleDrop}
-              className={`flex min-h-[275px] flex-col items-center justify-center rounded-lg border border-dashed px-6 text-center transition-all ${
+              className={`upload-dropzone flex flex-col items-center justify-center rounded-lg border border-dashed px-6 text-center transition-all ${
                 dragging
                   ? "scale-[1.005] border-[#e8a33d] bg-[#e8a33d]/10 shadow-[0_0_30px_rgba(232,163,61,.13)]"
                   : "border-[#241f13]/25 bg-[#fffdf8]/25 hover:border-[#c07f28] hover:bg-[#fffdf8]/40"
@@ -481,7 +481,7 @@ export default function PdfUploader() {
           ) : null}
 
           {/* Footer */}
-          <div className="mt-7 flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="upload-footer flex flex-col sm:flex-row sm:items-center sm:justify-between">
             <p className="font-[Kalam] text-[15px] text-[#857951]">
               <span className="text-[#c07f28]">not:</span>{" "}
               PDF yüklendikten sonra özet otomatik hazırlanır.

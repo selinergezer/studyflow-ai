@@ -29,10 +29,10 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
             <span>StudyFlow</span>
           </Link>
           <div className="auth-nav-actions">
-            <span className="auth-card-number">Kart No. 014</span>
-            <div className="auth-theme-switch" role="group" aria-label="Tema seç">
-              <button type="button" className={theme === "light" ? "active" : ""} onClick={() => setTheme("light")} aria-label="Aydınlık mod" aria-pressed={theme === "light"}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
-              <button type="button" className={theme === "dark" ? "active" : ""} onClick={() => setTheme("dark")} aria-label="Karanlık mod" aria-pressed={theme === "dark"}><svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4 7 7 0 0 0 20 14.5Z"/></svg></button>
+            <span className="auth-card-number">{t("cardNumber")}</span>
+            <div className="auth-theme-switch" role="group" aria-label={t("selectTheme")}>
+              <button type="button" className={theme === "light" ? "active" : ""} onClick={() => setTheme("light")} aria-label={t("lightMode")} aria-pressed={theme === "light"}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
+              <button type="button" className={theme === "dark" ? "active" : ""} onClick={() => setTheme("dark")} aria-label={t("darkMode")} aria-pressed={theme === "dark"}><svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4 7 7 0 0 0 20 14.5Z"/></svg></button>
             </div>
           </div>
         </header>
@@ -44,8 +44,9 @@ export default function AuthLayout({ children }: { children: ReactNode }) {
 
         <footer className="auth-footer">
           <p>© {new Date().getFullYear()} StudyFlow</p>
-          <p>{t("designedForLearning")}</p>
+          <p>{t("focusedLearningSuccess")}</p>
         </footer>
+
       </div>
     </main>
   );

@@ -27,7 +27,7 @@ export function RecentCourses({ courses, documents, loading }: DashboardSectionP
     .slice(0, 3);
 
   return (
-    <section className="dashboard-section" aria-labelledby="recent-courses-heading">
+    <section className="dashboard-section dashboard-panel" aria-labelledby="recent-courses-heading">
       <div className="dashboard-section-head">
         <h2 id="recent-courses-heading">{t("recentCourses")}</h2>
         <Link href="/courses">{t("viewAll")} →</Link>
@@ -65,7 +65,7 @@ export function RecentDocuments({ courses, documents, loading }: DashboardSectio
     .slice(0, 5);
 
   return (
-    <section className="dashboard-section" aria-labelledby="recent-documents-heading">
+    <section className="dashboard-section dashboard-panel dashboard-recent-documents" aria-labelledby="recent-documents-heading">
       <div className="dashboard-section-head">
         <h2 id="recent-documents-heading">{t("recentDocuments")}</h2>
         <Link href="/library">{t("viewLibrary")} →</Link>
