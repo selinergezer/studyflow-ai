@@ -14,18 +14,36 @@ import {
   type DocumentData,
 } from "@/lib/api";
 import { formatStudyDuration } from "@/lib/formatStudyDuration";
+import { translations } from "@/lib/translations";
 
-type StatsSummary = {
-  total_study_minutes: number;
-  total_study_hours: number;
+type StudySession = {
+  id: number;
+  course_id: number;
+  study_date: string;
+  duration_minutes: number;
+  description: string | null;
 };
+
+async function fetchTotalStudyMinutes() {
+  const sessions = await apiFetch<StudySession[]>("/study-sessions/");
+  return sessions.reduce(
+    (total, session) => total + session.duration_minutes,
+    0,
+  );
+}
+
+function todayInputValue() {
+  const now = new Date();
+  const localDate = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
+  return localDate.toISOString().slice(0, 10);
+}
 
 export default function DashboardShell() {
   const { t, language } = useLanguage();
 
   const [courses, setCourses] = useState<Course[]>([]);
   const [documents, setDocuments] = useState<DocumentData[]>([]);
-  const [stats, setStats] = useState<StatsSummary | null>(null);
+  const [totalStudyMinutes, setTotalStudyMinutes] = useState(0);
 
   const [loading, setLoading] = useState(true);
   const [statsLoading, setStatsLoading] = useState(true);
@@ -37,6 +55,7 @@ export default function DashboardShell() {
   const [studyDescription, setStudyDescription] = useState("");
   const [studySubmitting, setStudySubmitting] = useState(false);
   const [studyError, setStudyError] = useState<string | null>(null);
+  const [studyStatus, setStudyStatus] = useState<string | null>(null);
 
   const [greetingKey] = useState<
     "goodMorning" | "goodAfternoon" | "goodEvening" | "goodNight"
@@ -55,20 +74,21 @@ export default function DashboardShell() {
     Promise.all([
       apiFetch<Course[]>("/courses/"),
       apiFetch<DocumentData[]>("/documents/"),
-      apiFetch<StatsSummary>("/stats/summary"),
+      fetchTotalStudyMinutes(),
     ])
-      .then(([courseItems, documentItems, statsData]) => {
+      .then(([courseItems, documentItems, studyMinutesTotal]) => {
         setCourses(courseItems);
         setDocuments(documentItems);
-        setStats(statsData);
+        setTotalStudyMinutes(studyMinutesTotal);
       })
       .catch((cause) => {
         console.error(cause);
-
         setError(
-          language === "tr"
-            ? "Veriler şu anda yüklenemiyor."
-            : "Data is currently unavailable.",
+          apiErrorMessage(
+            cause,
+            translations[language].genericError,
+            translations[language].operationUnavailable,
+          ),
         );
       })
       .finally(() => {
@@ -93,8 +113,9 @@ export default function DashboardShell() {
   }, [studyModalOpen, studySubmitting]);
 
   function openStudyModal() {
-    setStudyDate(new Date().toLocaleDateString("en-CA"));
+    setStudyDate(todayInputValue());
     setStudyError(null);
+    setStudyStatus(null);
     setStudyModalOpen(true);
   }
 
@@ -106,6 +127,7 @@ export default function DashboardShell() {
 
   async function submitStudySession(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (studySubmitting) return;
 
     if (!selectedCourseId) {
       setStudyError(t("selectCourseError"));
@@ -115,7 +137,8 @@ export default function DashboardShell() {
       setStudyError(t("selectDateError"));
       return;
     }
-    if (!studyMinutes || Number(studyMinutes) <= 0) {
+    const durationMinutes = Number(studyMinutes);
+    if (!studyMinutes || !Number.isInteger(durationMinutes) || durationMinutes <= 0) {
       setStudyError(t("studyDurationError"));
       return;
     }
@@ -128,7 +151,7 @@ export default function DashboardShell() {
         body: JSON.stringify({
           course_id: Number(selectedCourseId),
           study_date: studyDate,
-          duration_minutes: Number(studyMinutes),
+          duration_minutes: durationMinutes,
           description: studyDescription.trim() || null,
         }),
       });
@@ -139,8 +162,9 @@ export default function DashboardShell() {
       setStudyModalOpen(false);
 
       try {
-        const updatedStats = await apiFetch<StatsSummary>("/stats/summary");
-        setStats(updatedStats);
+        const updatedTotal = await fetchTotalStudyMinutes();
+        setTotalStudyMinutes(updatedTotal);
+        setStudyStatus(t("studySessionSaved"));
       } catch (statsCause) {
         console.error(statsCause);
         setError(
@@ -149,7 +173,9 @@ export default function DashboardShell() {
       }
     } catch (cause) {
       console.error(cause);
-      setStudyError(apiErrorMessage(cause, t("studySessionFailed")));
+      setStudyError(
+        apiErrorMessage(cause, t("studySessionFailed"), t("operationUnavailable")),
+      );
     } finally {
       setStudySubmitting(false);
     }
@@ -188,7 +214,7 @@ export default function DashboardShell() {
               <h2>
                 {statsLoading
                   ? "..."
-                  : formatStudyDuration(stats?.total_study_hours ?? 0, language)}
+                  : formatStudyDuration(totalStudyMinutes, language, "minutes")}
               </h2>
 
               <p>
@@ -215,6 +241,12 @@ export default function DashboardShell() {
           role="alert"
         >
           {error}
+        </p>
+      ) : null}
+
+      {studyStatus ? (
+        <p className="dashboard-study-status" role="status">
+          {studyStatus}
         </p>
       ) : null}
 
@@ -263,7 +295,7 @@ export default function DashboardShell() {
               </label>
               <label className="dashboard-study-field">
                 <span>{t("studyDuration")}</span>
-                <input type="number" min="1" placeholder={t("minutesExample")} value={studyMinutes} onChange={(event) => setStudyMinutes(event.target.value)} />
+                <input type="number" min="1" step="1" placeholder={t("minutesExample")} value={studyMinutes} onChange={(event) => setStudyMinutes(event.target.value)} />
               </label>
               <label className="dashboard-study-field">
                 <span>{t("description")} <small>{t("optional")}</small></span>

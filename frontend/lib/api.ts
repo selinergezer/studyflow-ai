@@ -11,10 +11,11 @@ export function getToken() {
 }
 
 export function errorMessage(status: number, fallback?: string) {
+  if (fallback) return fallback;
   if (status === 401) return "Oturum süreniz dolmuş. Lütfen tekrar giriş yapın.";
   if (status === 404) return "İçerik bulunamadı.";
   if (status >= 500) return "İşlem sırasında bir hata oluştu.";
-  return fallback || "İşlem sırasında bir hata oluştu.";
+  return "İşlem sırasında bir hata oluştu.";
 }
 
 export function apiErrorMessage(cause: unknown, fallback = "İşlem sırasında bir hata oluştu.", networkFallback = "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin.") {
