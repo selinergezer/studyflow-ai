@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
@@ -9,7 +9,7 @@ from app.models.user import User
 from app.core.security import get_current_user
 
 from app.models.document import Document
-from app.services.ai_service import generate_flashcards
+from app.services.ai_service import OllamaServiceError, generate_flashcards
 
 from datetime import datetime, timedelta, timezone
 
@@ -203,11 +203,14 @@ def generate_flashcards_endpoint(
             "message": "Flashcard sayısı 1 ile 30 arasında olmalıdır."
         }
 
-    # Gemini ile flashcard oluştur
-    ai_result = generate_flashcards(
-        document.text,
-        flashcard_count
-    )
+    # Ollama ile flashcard oluştur
+    try:
+        ai_result = generate_flashcards(
+            document.text,
+            flashcard_count
+        )
+    except OllamaServiceError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
     created_flashcards = []
 

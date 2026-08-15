@@ -11,7 +11,7 @@ from app.models.user import User
 from app.core.security import get_current_user
 
 from app.services.pdf_service import extract_text_from_pdf
-from app.services.ai_service import generate_summary
+from app.services.ai_service import OllamaServiceError, generate_summary
 
 
 router = APIRouter(
@@ -56,7 +56,10 @@ def upload_document(
 
     text, page_count = extract_text_from_pdf(file_path)
 
-    summary = generate_summary(text)
+    try:
+        summary = generate_summary(text)
+    except OllamaServiceError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
     new_document = Document(
         filename=file.filename,
