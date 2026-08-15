@@ -1,10 +1,14 @@
 from google import genai
-from google.genai import types
-from pydantic import BaseModel
-from typing import Optional, Literal
-
+from google.genai import errors, types
+from pydantic import BaseModel, Field
+from typing import Literal, Optional
+from difflib import SequenceMatcher
+import httpx
+import json
+import re
+import time
+import unicodedata
 from app.core.config import settings
-from app.services.ollama_service import generate_with_ollama
 
 
 # =========================================================
@@ -17,26 +21,86 @@ client = genai.Client(
 
 
 # =========================================================
+# OLLAMA CLIENT
+# =========================================================
+
+class OllamaServiceError(RuntimeError):
+    """Yerel yapay zeka servisinden kontrollü olarak dönen hata."""
+
+
+def _generate_with_ollama(
+    prompt: str,
+    *,
+    json_response: bool = False,
+    json_schema: Optional[dict] = None,
+    num_predict: int = 450,
+) -> str:
+    payload = {
+        "model": settings.OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "keep_alive": "10m",
+        "options": {
+            "temperature": 0.1,
+            "num_predict": num_predict,
+        },
+    }
+
+    if json_schema is not None:
+        payload["format"] = json_schema
+    elif json_response:
+        payload["format"] = "json"
+
+    try:
+        response = httpx.post(
+            f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/generate",
+            json=payload,
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (httpx.RequestError, httpx.HTTPStatusError) as error:
+        raise OllamaServiceError(
+            "Yerel yapay zeka servisine ulaşılamıyor."
+        ) from error
+    except (json.JSONDecodeError, ValueError) as error:
+        raise OllamaServiceError(
+            "Yapay zeka geçerli bir yanıt oluşturamadı."
+        ) from error
+
+    generated_text = data.get("response")
+
+    if not isinstance(generated_text, str) or not generated_text.strip():
+        raise OllamaServiceError(
+            "Yapay zeka geçerli bir yanıt oluşturamadı."
+        )
+
+    return generated_text.strip()
+
+
+# =========================================================
 # QUIZ RESPONSE MODELLERİ
 # =========================================================
 
 class QuizQuestion(BaseModel):
-    # Artık yalnızca çoktan seçmeli soru kabul ediyoruz.
     question_type: Literal["multiple_choice"]
-
     question_text: str
 
-    # Beş şık da zorunlu.
     option_a: str
     option_b: str
     option_c: str
     option_d: str
     option_e: str
 
-    # Doğru cevap yalnızca A-E olabilir.
     correct_answer: Literal["A", "B", "C", "D", "E"]
-
     explanation: str
+
+
+class OllamaQuizQuestion(BaseModel):
+    source_fact: str = Field(min_length=1, max_length=500)
+    question_text: str
+    options: list[str] = Field(min_length=5, max_length=5)
+    correct_answer: Literal["A", "B", "C", "D", "E"]
 
 
 class QuizResponse(BaseModel):
@@ -44,86 +108,488 @@ class QuizResponse(BaseModel):
 
 
 # =========================================================
-# PDF ÖZETLEME - OLLAMA
+# PDF ÖZETLEME
 # =========================================================
 
 def generate_summary(text: str):
 
     prompt = f"""
-Sen StudyFlow AI adlı öğrenme platformunun
-özetleme asistanısın.
+Aşağıdaki ders notunu Türkçe özetle.
 
-Aşağıdaki ders notunu yalnızca verilen içeriğe dayanarak özetle.
+Kurallar:
 
-DİL KURALI:
-- Özet, kaynak ders notuyla AYNI DİLDE olmalıdır.
-- Kaynak İngilizceyse İngilizce yaz.
-- Kaynak Türkçeyse Türkçe yaz.
-- Başka bir dildeyse mümkün olduğunca aynı dili kullan.
-
-KURALLAR:
-- Bilgi uydurma.
-- Ders notunda olmayan bilgi ekleme.
-- En fazla 500 kelime yaz.
-- Düzenli başlıklar ve maddeler kullan.
+- En fazla 250 kelime.
+- Madde madde yaz.
 - Önemli kavramları belirt.
-- Teknik terimleri koru.
-- Açık ve öğrenci dostu bir dil kullan.
-- Gereksiz giriş ve kapanış cümleleri yazma.
-- "Certainly", "Here is your summary" gibi gereksiz ifadeler yazma.
-- Yalnızca özeti döndür.
 
-DERS NOTU:
+Ders Notu:
 
 {text[:15000]}
 """
 
-    return generate_with_ollama(prompt)
+    return _generate_with_ollama(prompt)
 
 
 # =========================================================
-# QUIZ DOĞRULAMA
+# AI QUIZ OLUŞTURMA
 # =========================================================
+
+_SUBQUESTION_NUMBERING = re.compile(
+    r"(?:^|[\n;]|\s)\d+[.)]\s+",
+    re.MULTILINE,
+)
+_EMBEDDED_OPTION = re.compile(
+    r"(?:^|\s)[A-E][.)]\s+",
+    re.MULTILINE,
+)
+_SUBQUESTION_LETTERING = re.compile(
+    r"(?:^|[\n;]|\s)[a-e][.)]\s+",
+    re.IGNORECASE | re.MULTILINE,
+)
+_OPTION_PREFIX = re.compile(
+    r"^\s*[A-E]\s*(?:[.)]|[-–—:])\s*",
+    re.IGNORECASE,
+)
+_OPEN_ENDED_TASK = re.compile(
+    r"\b(?:çiziniz|çizin|açıklayınız|açıklayın|yorumlayınız|yorumlayın|"
+    r"ispatlayınız|ispatlayın|gösteriniz|gösterin)\b"
+)
+_TASK_VERB = re.compile(
+    r"\b(?:hesaplayınız|hesaplayın|bulunuz|bulun|bulup|belirleyiniz|"
+    r"belirleyin|çiziniz|çizin|açıklayınız|açıklayın|yorumlayınız|"
+    r"yorumlayın)\b"
+)
+_BROKEN_OCR_SUFFIX = re.compile(
+    r"\b[bcçdfgğhjklmnprsştvyz]\s+(?:dır|dir|dur|dür|tır|tir|tur|tür)\b",
+    re.IGNORECASE,
+)
+_VAGUE_QUESTION_STEM = re.compile(
+    r"\b(?:karşılıklarını\s+seç(?:in|iniz)|hangisini\s+seç(?:in|iniz))\b",
+    re.IGNORECASE,
+)
+_GENERIC_OPTION_VALUES = {
+    "doğru",
+    "yanlış",
+    "evet",
+    "hayır",
+    "bilinmiyor",
+    "belirsiz",
+    "başka bir",
+    "hiçbiri",
+}
+_OPTION_SYNONYMS = {
+    "diskret": "kesikli",
+    "devamlı": "sürekli",
+    "evet": "doğru",
+    "hayır": "yanlış",
+    "kontinuum": "sürekli",
+    "kontinüum": "sürekli",
+    "kontinüüm": "sürekli",
+}
+_OPTION_PHRASE_SYNONYMS = {
+    "ya da": "veya",
+}
+_RANGE_QUESTION = re.compile(
+    r"\b(?:hangi\s+değerleri\s+alır|hangi\s+aralıkta)\b",
+    re.IGNORECASE,
+)
+_SINGLE_NUMBER_OPTION = re.compile(
+    r"^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)\s*%?$"
+)
+_CONTEXT_DEPENDENT_REFERENCE = re.compile(
+    r"\b(?:yukarıdaki\s+bilgileri|aşağıdaki\s+soruları|şekle\s+göre|"
+    r"tabloya\s+göre)\b",
+    re.IGNORECASE,
+)
+def _normalized_question_text(question_text: str) -> str:
+    return " ".join(
+        re.sub(r"[^\w\s]", " ", question_text.casefold()).split()
+    )
+
+
+def _canonical_option(option: str) -> str:
+    normalized_option = _normalized_question_text(option)
+
+    for phrase, replacement in _OPTION_PHRASE_SYNONYMS.items():
+        normalized_option = re.sub(
+            rf"\b{re.escape(phrase)}\b",
+            replacement,
+            normalized_option,
+        )
+
+    tokens = normalized_option.split()
+    canonical_tokens = [_OPTION_SYNONYMS.get(token, token) for token in tokens]
+    return " ".join(canonical_tokens)
+
+
+def _prepare_quiz_source(text: str) -> str:
+    cleaned_lines = []
+
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.split()).strip()
+
+        if not line:
+            continue
+
+        if any(unicodedata.category(character) == "Co" for character in line):
+            continue
+
+        if line.endswith("="):
+            continue
+
+        if _CONTEXT_DEPENDENT_REFERENCE.search(line):
+            continue
+
+        compact_line = "".join(line.split())
+        alphanumeric_count = sum(character.isalnum() for character in compact_line)
+        symbol_count = sum(
+            not character.isalnum() for character in compact_line
+        )
+        natural_words = re.findall(r"[^\W\d_]{2,}", line)
+
+        if (
+            len(compact_line) >= 8
+            and symbol_count > alphanumeric_count * 1.5
+            and len(natural_words) < 2
+        ):
+            continue
+
+        if (
+            len(compact_line) < 12
+            and len(natural_words) < 2
+            and not re.search(r"=\s*\S+", line)
+            and not re.search(r"\w\s*[=≤≥+\-/]\s*\w", line)
+        ):
+            continue
+
+        cleaned_lines.append(line)
+
+    cleaned_text = "\n".join(cleaned_lines).strip()
+
+    if cleaned_text:
+        return cleaned_text
+
+    fallback_lines = []
+
+    for raw_line in text.splitlines():
+        line = " ".join(raw_line.split()).strip()
+        alpha_count = sum(character.isalpha() for character in line)
+
+        if (
+            line
+            and alpha_count >= 10
+            and not line.endswith("=")
+            and not _CONTEXT_DEPENDENT_REFERENCE.search(line)
+            and not any(
+                unicodedata.category(character) == "Co"
+                for character in line
+            )
+        ):
+            fallback_lines.append(line)
+
+    return "\n".join(fallback_lines).strip()
+
+
+def _validate_ollama_source_fact(generated: OllamaQuizQuestion) -> None:
+    source_fact = generated.source_fact.strip()
+
+    if not source_fact:
+        raise ValueError("source_fact boş.")
+
+    if len(source_fact) > 500:
+        raise ValueError("source_fact çok uzun.")
+
+
+def _looks_like_information_block(question_text: str) -> bool:
+    nonempty_lines = [
+        line for line in question_text.splitlines() if line.strip()
+    ]
+    probability_results = re.findall(
+        r"olasılığ[ıi]\s*=",
+        question_text.casefold(),
+    )
+    list_markers = re.findall(
+        r"(?:^|\n)\s*(?:[-•*]|\d+[.)]|[a-e][.)])\s+",
+        question_text,
+        re.IGNORECASE,
+    )
+
+    return (
+        len(nonempty_lines) >= 5
+        or question_text.count("=") >= 3
+        or len(probability_results) >= 2
+        or len(list_markers) >= 3
+        or (
+            len(question_text) > 600
+            and len(re.findall(r"[.!?]", question_text)) >= 4
+        )
+    )
+
+
+def _is_obviously_broken_question(question_text: str) -> bool:
+    compact_text = "".join(question_text.split())
+    meaningful_char_count = sum(
+        character.isalnum() for character in compact_text
+    )
+
+    if (
+        "�" in question_text
+        or meaningful_char_count == 0
+        or _BROKEN_OCR_SUFFIX.search(question_text)
+    ):
+        return True
+
+    if len(compact_text) < 10 and meaningful_char_count < 3:
+        return True
+
+    if (
+        len(compact_text) >= 8
+        and meaningful_char_count / len(compact_text) < 0.2
+    ):
+        return True
+
+    natural_words = re.findall(r"[^\W\d_]{2,}", question_text)
+    formula_symbols = sum(
+        not character.isalnum() and not character.isspace()
+        for character in question_text
+    )
+    question_cues = ("nedir", "kaçtır", "hangisi", "seçiniz", "seçin")
+
+    return (
+        len(natural_words) <= 1
+        and formula_symbols >= 3
+        and not any(cue in question_text.casefold() for cue in question_cues)
+    )
+
+
+def _select_fallback_context(context: str, max_chars: int = 4000) -> str:
+    chunks = [
+        chunk.strip()
+        for chunk in re.split(r"\n\s*\n|(?<=[.!?])\s+", context)
+        if chunk.strip()
+    ]
+    preferred_markers = (
+        "tanım",
+        "kavram",
+        "temel",
+        "kural",
+        "ifade eder",
+        "olarak adlandırılır",
+        "denir",
+        "özelli",
+    )
+    unsuitable_markers = (
+        "alıştırma",
+        "grafiğini çiz",
+        "grafik çiz",
+        "hesaplayınız",
+        "hesaplayın",
+        "örnek çözüm",
+        "çözüm:",
+        "tablo",
+    )
+    suitable_chunks = []
+
+    for position, chunk in enumerate(chunks):
+        normalized_chunk = chunk.casefold()
+
+        if (
+            _SUBQUESTION_NUMBERING.search(chunk)
+            or _SUBQUESTION_LETTERING.search(chunk)
+            or _OPEN_ENDED_TASK.search(normalized_chunk)
+            or len(_TASK_VERB.findall(normalized_chunk)) >= 2
+            or re.match(r"^örnek\s*:", normalized_chunk)
+            or any(marker in normalized_chunk for marker in unsuitable_markers)
+        ):
+            continue
+
+        priority = 0 if any(
+            marker in normalized_chunk for marker in preferred_markers
+        ) else 1
+        suitable_chunks.append((priority, position, chunk))
+
+    suitable_chunks.sort(key=lambda item: (item[0], item[1]))
+    selected_chunks = []
+    selected_length = 0
+
+    for _, _, chunk in suitable_chunks:
+        remaining_chars = max_chars - selected_length
+
+        if remaining_chars <= 0:
+            break
+
+        selected_chunk = chunk[:remaining_chars]
+        selected_chunks.append(selected_chunk)
+        selected_length += len(selected_chunk) + 1
+
+    fallback_context = "\n".join(selected_chunks).strip()
+    return fallback_context or context[:max_chars]
+
+
+def _select_alternate_context(
+    text: str,
+    avoided_context_starts: list[int],
+    max_chars: int = 4000,
+) -> str:
+    if len(text) <= max_chars:
+        return _select_fallback_context(text, max_chars)
+
+    last_start = len(text) - max_chars
+    candidate_starts = list(range(0, last_start + 1, max_chars))
+
+    if candidate_starts[-1] != last_start:
+        candidate_starts.append(last_start)
+
+    def distance_from_used_contexts(candidate_start: int) -> int:
+        if not avoided_context_starts:
+            return last_start
+
+        return min(
+            abs(candidate_start - used_start)
+            for used_start in avoided_context_starts
+        )
+
+    alternate_start = max(
+        candidate_starts,
+        key=distance_from_used_contexts,
+    )
+    alternate_window = text[
+        alternate_start:alternate_start + max_chars
+    ]
+    return _select_fallback_context(alternate_window, max_chars)
+
+
+def _quiz_retry_instruction(error: ValueError) -> str:
+    if isinstance(error, json.JSONDecodeError):
+        return (
+            "Önceki yanıt geçersiz JSON'du. Bu kez yalnızca kısa ve "
+            "eksiksiz JSON döndür."
+        )
+
+    error_message = str(error).casefold()
+
+    if "source_fact" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: source_fact boş veya fazla uzundu.\n"
+            "Contextten kısa ve açık bir source_fact seç."
+        )
+
+    if "birden fazla alt soru" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Birden fazla alt soru ürettin.\n"
+            "Bu kez question_text içinde TAM OLARAK TEK soru yaz. "
+            "1., 2., 3. gibi alt maddeler kullanma."
+        )
+
+    if "açık uçlu veya birden fazla görev" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Açık uçlu veya çok görevli soru yazdın.\n"
+            "Bu kez çizme/açıklama istemeyen, tek cevaplı bir multiple-choice "
+            "soru yaz."
+        )
+
+    if "anlamsız veya eksik" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Soru metni bozuk veya eksikti.\n"
+            "OCR parçasını kopyalama; kavramı düzgün ve tam bir Türkçe soruya dönüştür."
+        )
+
+    if "belirsiz" in error_message and "soru kökü" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Soru kökü neyin sorulduğunu açıklamıyordu.\n"
+            "Bu kez tek bir açık bilgiyi soran, bağımsız ve kesin bir soru yaz."
+        )
+
+    if "doğru-yanlış kılığı" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Doğru-yanlış sorusunu 5 şıklı gösterdin.\n"
+            "Gerçek bir multiple-choice soru ve kavramsal seçenekler üret."
+        )
+
+    if "bilgi bloğu" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Soru yerine uzun bir bilgi bloğu yazdın.\n"
+            "Bu kez tek kavramı soran kısa bir question_text üret."
+        )
+
+    if "anlamsal olarak tekrarlanan" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Seçenekler eş anlamlı kavramlar içeriyordu.\n"
+            "Bu kez anlamca farklı 5 seçenek üret ve yalnızca birini doğru yap."
+        )
+
+    if "aralık sorusu" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Aralık sorusuna tekil sayı seçenekleri verdin.\n"
+            "Aralık seçenekleri üret veya daha basit bir kavram sor."
+        )
+
+    if "seçenek etiketi içeriyor" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: options içinde A), B) gibi etiket kullandın.\n"
+            "Seçenek metinlerini harf etiketi olmadan yaz."
+        )
+
+    if "tekrarlanan şık" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Seçenekler tekrar etti.\n"
+            "Bu kez options dizisindeki beş seçenek de farklı olsun."
+        )
+
+    if "correct_answer" in error_message or "doğru cevabı" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: correct_answer formatı hatalıydı.\n"
+            "correct_answer yalnızca tek harf olmalı: A, B, C, D veya E."
+        )
+
+    if "question_text içine gömülmüş" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Seçenekleri soru metnine yazdın.\n"
+            "question_text içine seçenek ekleme; seçenekleri yalnızca "
+            "options dizisine yaz."
+        )
+
+    if "gereksiz sayıda soru işareti" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Soru metninde birden fazla soru sordun.\n"
+            "Bu kez question_text içinde tek ve bağımsız bir soru sor."
+        )
+
+    if "aşırı benzer" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Soru önceki bir soruya çok benziyordu.\n"
+            "Bu kez ders notundan farklı bir kavram seç ve farklı bir soru yaz."
+        )
+
+    if "eksik veya boş şık" in error_message:
+        return (
+            "ÖNCEKİ DENEME GEÇERSİZDİ: Bir veya daha fazla seçenek boştu.\n"
+            "options dizisine tam 5 dolu seçenek yaz."
+        )
+
+    return (
+        "ÖNCEKİ DENEME GEÇERSİZDİ: Çıktı quiz kurallarına uymadı.\n"
+        "Bu kez question_text, options ve correct_answer alanlarını eksiksiz doldur."
+    )
+
 
 def _validate_quiz(
     quiz: QuizResponse,
-    question_count: int
+    question_count: int,
+    previous_question_texts: Optional[list[str]] = None,
 ):
+    """Validate Ollama quiz output before returning it to the API."""
 
-    if quiz is None:
-        raise ValueError(
-            "AI quiz cevabı boş döndü."
-        )
+    if quiz is None or not quiz.questions:
+        raise ValueError("AI hiç soru oluşturmadı.")
 
-    if not quiz.questions:
-        raise ValueError(
-            "AI hiç soru oluşturmadı."
-        )
-
-    # İstenen soru sayısı tam olmalı.
     if len(quiz.questions) != question_count:
         raise ValueError(
             f"AI {question_count} soru yerine "
             f"{len(quiz.questions)} soru oluşturdu."
         )
 
-    for index, question in enumerate(
-        quiz.questions,
-        start=1
-    ):
-
-        # -----------------------------------------------------
-        # SORU METNİ
-        # -----------------------------------------------------
-
-        if not question.question_text.strip():
-            raise ValueError(
-                f"{index}. sorunun soru metni boş."
-            )
-
-        # -----------------------------------------------------
-        # QUESTION TYPE
-        # -----------------------------------------------------
+    for index, question in enumerate(quiz.questions, start=1):
 
         if question.question_type != "multiple_choice":
             raise ValueError(
@@ -131,9 +597,82 @@ def _validate_quiz(
                 f"{question.question_type}"
             )
 
-        # -----------------------------------------------------
-        # ŞIKLAR
-        # -----------------------------------------------------
+        if not question.question_text.strip():
+            raise ValueError(f"{index}. sorunun soru metni boş.")
+
+        question_text = question.question_text.strip()
+
+        if _is_obviously_broken_question(question_text):
+            raise ValueError(
+                f"{index}. sorunun metni anlamsız veya eksik görünüyor."
+            )
+
+        if len(_SUBQUESTION_NUMBERING.findall(question_text)) >= 2:
+            raise ValueError(
+                f"{index}. sorunun metninde birden fazla alt soru var."
+            )
+
+        if len(_SUBQUESTION_LETTERING.findall(question_text)) >= 2:
+            raise ValueError(
+                f"{index}. sorunun metninde birden fazla alt soru var."
+            )
+
+        if len(_EMBEDDED_OPTION.findall(question_text)) >= 3:
+            raise ValueError(
+                f"{index}. sorunun seçenekleri question_text içine gömülmüş."
+            )
+
+        if _VAGUE_QUESTION_STEM.search(question_text):
+            raise ValueError(
+                f"{index}. sorunun soru kökü belirsiz; neyin sorulduğu açık değil."
+            )
+
+        if _looks_like_information_block(question_text):
+            raise ValueError(
+                f"{index}. sorunun metni soru yerine çok maddeli bir bilgi bloğu içeriyor."
+            )
+
+        question_mark_count = question_text.count("?") + question_text.count("؟")
+
+        if question_mark_count > 2:
+            raise ValueError(
+                f"{index}. sorunun metninde gereksiz sayıda soru işareti var."
+            )
+
+        normalized_for_tasks = question_text.casefold()
+
+        if (
+            _OPEN_ENDED_TASK.search(normalized_for_tasks)
+            or len(_TASK_VERB.findall(normalized_for_tasks)) >= 2
+        ):
+            raise ValueError(
+                f"{index}. soru açık uçlu veya birden fazla görev içeriyor."
+            )
+
+        normalized_question = _normalized_question_text(question_text)
+        comparison_texts = list(previous_question_texts or [])
+        comparison_texts.extend(
+            item.question_text for item in quiz.questions[:index - 1]
+        )
+
+        for previous_text in comparison_texts:
+            normalized_previous = _normalized_question_text(previous_text)
+            similarity = SequenceMatcher(
+                None,
+                normalized_question,
+                normalized_previous,
+            ).ratio()
+
+            if normalized_question == normalized_previous or similarity >= 0.9:
+                raise ValueError(
+                    f"{index}. soru önceki bir soruyla aşırı benzer."
+                )
+
+        if not question.correct_answer.strip():
+            raise ValueError(f"{index}. sorunun doğru cevabı boş.")
+
+        if not question.explanation.strip():
+            raise ValueError(f"{index}. sorunun açıklaması boş.")
 
         options = [
             question.option_a,
@@ -143,214 +682,349 @@ def _validate_quiz(
             question.option_e,
         ]
 
-        # Hiçbir şık boş olmamalı.
-        if any(
-            option is None or not option.strip()
-            for option in options
-        ):
+        if any(option is None or not option.strip() for option in options):
             raise ValueError(
-                f"{index}. soruda eksik veya boş şık var."
+                f"{index}. multiple choice sorusunda eksik veya boş şık var."
             )
 
-        # Şıklar birbirinden farklı olmalı.
-        normalized_options = [
-            option.strip().casefold()
-            for option in options
-        ]
+        if any(_OPTION_PREFIX.match(option) for option in options):
+            raise ValueError(
+                f"{index}. multiple choice seçeneği A), B) gibi seçenek etiketi içeriyor."
+            )
+
+        normalized_options = [option.strip().casefold() for option in options]
 
         if len(set(normalized_options)) != 5:
             raise ValueError(
-                f"{index}. soruda tekrarlanan şık var."
+                f"{index}. multiple choice sorusunda tekrarlanan şık var."
             )
 
-        # -----------------------------------------------------
-        # DOĞRU CEVAP
-        # -----------------------------------------------------
+        canonical_options = [_canonical_option(option) for option in options]
 
-        correct_answer = (
-            question.correct_answer
-            .strip()
-            .upper()
+        if len(set(canonical_options)) != 5:
+            raise ValueError(
+                f"{index}. soruda anlamsal olarak tekrarlanan seçenek var."
+            )
+
+        single_number_option_count = sum(
+            _SINGLE_NUMBER_OPTION.fullmatch(option.strip()) is not None
+            for option in options
         )
 
-        if correct_answer not in {
-            "A",
-            "B",
-            "C",
-            "D",
-            "E"
-        }:
+        if (
+            _RANGE_QUESTION.search(question_text)
+            and single_number_option_count >= 4
+        ):
             raise ValueError(
-                f"{index}. sorunun doğru cevabı "
-                f"A, B, C, D veya E olmalı."
+                f"{index}. aralık sorusu yalnızca tekil sayısal seçenekler içeriyor."
             )
 
-        # -----------------------------------------------------
-        # AÇIKLAMA
-        # -----------------------------------------------------
+        generic_option_count = sum(
+            _normalized_question_text(option) in _GENERIC_OPTION_VALUES
+            for option in options
+        )
 
-        if not question.explanation.strip():
+        if generic_option_count >= 3:
             raise ValueError(
-                f"{index}. sorunun açıklaması boş."
+                f"{index}. soru doğru-yanlış kılığına sokulmuş veya "
+                "yapay dolgu seçenekleri içeriyor."
+            )
+
+        question.correct_answer = question.correct_answer.strip().upper()
+
+        if question.correct_answer not in {"A", "B", "C", "D", "E"}:
+            raise ValueError(
+                f"{index}. multiple choice sorusunun doğru cevabı "
+                "A, B, C, D veya E olmalı."
             )
 
     return quiz
 
 
-# =========================================================
-# AI QUIZ OLUŞTURMA - OLLAMA
-# =========================================================
+def _to_quiz_question(generated: OllamaQuizQuestion) -> QuizQuestion:
+    normalized_options = [
+        _OPTION_PREFIX.sub("", option, count=1).strip()
+        for option in generated.options
+    ]
+
+    return QuizQuestion(
+        question_type="multiple_choice",
+        question_text=generated.question_text,
+        option_a=normalized_options[0],
+        option_b=normalized_options[1],
+        option_c=normalized_options[2],
+        option_d=normalized_options[3],
+        option_e=normalized_options[4],
+        correct_answer=generated.correct_answer,
+        explanation=f"Doğru cevap: {generated.correct_answer}",
+    )
+
 
 def generate_quiz(
-
     text: str,
-
     question_count: int = 10
-
 ):
-
-    questions = []
+    quiz_source = _prepare_quiz_source(text)
+    questions: list[QuizQuestion] = []
+    max_attempts = 3
+    max_context_chars = 15000
+    quiz_json_schema = OllamaQuizQuestion.model_json_schema()
+    quiz_started_at = time.perf_counter()
+    used_context_starts: list[int] = []
 
     for question_number in range(1, question_count + 1):
+        previous_questions = "\n".join(
+            f"- {question.question_text[:200]}" for question in questions
+        ) or "Henüz önceki soru yok."
+
+        if len(quiz_source) <= max_context_chars or question_count == 1:
+            context_start = 0
+            context = quiz_source[:max_context_chars]
+        else:
+            available_offset = len(quiz_source) - max_context_chars
+            context_start = round(
+                available_offset * (question_number - 1) / (question_count - 1)
+            )
+            context = quiz_source[
+                context_start:context_start + max_context_chars
+            ]
+
+        used_context_starts.append(context_start)
 
         prompt = f"""
-
-Sen StudyFlow AI adlı kişisel öğrenme platformunun
-
-çoktan seçmeli sınav hazırlama asistanısın.
-
-Aşağıdaki ders notuna dayanarak SADECE 1 adet
-
-çoktan seçmeli soru oluştur.
-
-Bu soru, toplam {question_count} soruluk sınavın
-
-{question_number}. sorusudur.
+Verilen ders notundan toplam {question_count} soruluk quiz'in
+{question_number}. sorusunu üret.
 
 KURALLAR:
 
-- Yalnızca 1 soru üret.
+- Önce context içinden açık ve güvenilir TEK bir bilgiyi source_fact alanına yaz.
+- source_fact en fazla 1-2 kısa cümle olsun ve kaynakta olmayan bilgi içermesin.
+- question_text, options ve correct_answer alanlarını yalnızca source_fact üzerinden oluştur.
+- Doğru cevabı source_fact üzerinden doğrudan kanıtlayamıyorsan bu soruyu üretme; daha basit bir bilgi seç.
+- Doğru cevap context içinde açıkça desteklenmiyorsa daha basit bir kavram seç.
+- Hesaplama sonucu contextten güvenilir biçimde çıkarılamıyorsa kullanma.
+- Tek bağımsız ve tek başına anlaşılabilir soru üret; alt sorular yazma.
+- question_text düzgün ve tam bir Türkçe soru olsun; "?" veya "." ile bitebilir.
+- Soru kökünde neyin sorulduğu açık olsun; eksik veya belirsiz ifade kullanma.
+- a), b) alt soruları veya birden fazla görev kullanma.
+- Grafik çizme, açıklama yazma ya da benzeri açık uçlu görevler isteme.
+- Doğru/yanlış sorusunu 5 şıklı multiple-choice gibi gösterme.
+- question_text içine A)-E) seçenekleri ekleme.
+- options aynı türde, anlamlı 5 farklı seçenek içersin ve yalnızca biri doğru olsun.
+- Seçenekler aynı kavramın eş anlamlıları olmasın; Kesikli/Diskret gibi tekrarlar kullanma.
+- Bir sorunun birden fazla makul doğru cevabı varsa o soruyu kullanma.
+- "Hangi değerleri alır?" veya "hangi aralıkta?" sorularında tekil rastgele sayıları seçenek yapma.
+- Doğru, Yanlış, Bilinmiyor, Belirsiz, Başka bir veya Hiçbiri gibi dolgu setleri kullanma.
+- options metinlerinin başına A), B), C), D), E) ekleme.
+- correct_answer yalnızca A, B, C, D veya E olsun.
+- Yalnızca kaynak metne dayan, bilgi uydurma ve kaynak dilini koru.
+- Bozuk OCR parçasını veya örnek soruyu kopyalama; kavramı temiz bir soruya dönüştür.
+- question_text içine uzun bilgi, sonuç veya "olasılığı =" listeleri koyma.
+- Önceki sorulardan farklı bir kavram seç.
+- Yalnızca eksiksiz JSON döndür; başka metin yazma.
 
-- question_type TAM OLARAK "multiple_choice" olmalıdır.
+DAHA ÖNCE OLUŞTURULAN SORULAR:
 
-- question_text dolu olmalıdır.
-
-- option_a dolu olmalıdır.
-
-- option_b dolu olmalıdır.
-
-- option_c dolu olmalıdır.
-
-- option_d dolu olmalıdır.
-
-- option_e dolu olmalıdır.
-
-- Beş seçenek birbirinden farklı olmalıdır.
-
-- correct_answer yalnızca "A", "B", "C", "D" veya "E" olmalıdır.
-
-- explanation dolu olmalıdır.
-
-- Soruyu yalnızca verilen ders notundaki bilgilerden oluştur.
-
-- Bilgi uydurma.
-
-- Soruyu ders notunun diliyle aynı dilde oluştur.
-
-- Mümkün olduğunca önceki sorulardan farklı bir kavram seç.
+{previous_questions}
 
 DERS NOTU:
 
-{text[:30000]}
+{context}
 
+Yalnızca aşağıdaki yapıda geçerli JSON döndür:
+
+{{
+  "source_fact": "...",
+  "question_text": "...",
+  "options": ["...", "...", "...", "...", "..."],
+  "correct_answer": "A"
+}}
 """
 
-        max_attempts = 3
-
         generated_question = None
+        question_started_at = time.perf_counter()
+        retry_instruction = ""
 
         for attempt in range(1, max_attempts + 1):
+            attempt_started_at = time.perf_counter()
+            attempt_prompt = prompt
+
+            if retry_instruction:
+                attempt_prompt = f"{prompt}\n\n{retry_instruction}"
 
             try:
-
-                raw_response = generate_with_ollama(
-
-                    prompt,
-
-                    response_schema=QuizQuestion.model_json_schema(),
-
+                raw_response = _generate_with_ollama(
+                    attempt_prompt,
+                    json_schema=quiz_json_schema,
+                    num_predict=400,
                 )
-
-                generated_question = QuizQuestion.model_validate_json(
-
-                    raw_response
-
+                generated = OllamaQuizQuestion.model_validate(
+                    json.loads(raw_response)
                 )
-
-                temp_quiz = QuizResponse(
-
-                    questions=[generated_question]
-
-                )
-
+                _validate_ollama_source_fact(generated)
+                generated_question = _to_quiz_question(generated)
                 _validate_quiz(
-
-                    temp_quiz,
-
-                    1
-
+                    QuizResponse(questions=[generated_question]),
+                    1,
+                    previous_question_texts=[
+                        question.question_text for question in questions
+                    ],
                 )
-
                 break
-
-            except Exception as error:
-
+            except (json.JSONDecodeError, ValueError) as error:
+                generated_question = None
+                attempt_duration = time.perf_counter() - attempt_started_at
+                retry_instruction = _quiz_retry_instruction(error)
                 print(
-
                     f"Ollama {question_number}. soru doğrulama hatası "
-
-                    f"(deneme {attempt}/{max_attempts}): {error}"
-
+                    f"(deneme {attempt}/{max_attempts}, "
+                    f"{attempt_duration:.1f} sn): {error}"
                 )
-
-                if attempt == max_attempts:
-
-                    raise ValueError(
-
-                        f"{question_number}. soru oluşturulamadı."
-
-                    ) from error
 
         if generated_question is None:
+            fallback_context = _select_fallback_context(context)
+            fallback_prompt = f"""
+Bu metinden yalnızca temel bir kavram seç.
+Kısa ve bağımsız tek bir çoktan seçmeli soru oluştur.
+- source_fact alanına kaynaktan 1-2 kısa cümlelik doğrudan bilgiyi yaz.
+- Soruyu ve doğru cevabı yalnızca source_fact üzerinden oluştur.
+- Doğru cevabı source_fact ile kanıtlayamıyorsan daha basit bilgi seç.
+- Bir hesaplama örneğini kopyalama.
+- Kaynak metinden basit bir TANIM veya TEMEL KAVRAM seç.
+- Doğru cevabı yalnızca kaynak metindeki açık ve doğrudan bilgiye dayandır.
+- Emin değilsen daha basit başka bir kavram seç.
+- Hesaplama gerektirmeyen veya basit hesaplamalı bir soru tercih et.
+- Alt soru ve a), b), c) kullanma.
+- Grafik çizme, açıklama yazma veya birden fazla işlem isteme.
+- Doğru/yanlış mantığında soru veya dolgu seçenekleri üretme.
+- Aynı türde, anlamlı 5 kısa ve birbirinden farklı seçenek üret.
+- Eş anlamlı seçenekler kullanma; yalnızca bir seçenek makul biçimde doğru olsun.
+- Genel bir aralık sorusuna tekil rastgele sayı seçenekleri verme.
+- question_text içine uzun bilgi veya sonuç listesi koyma.
+- options içine A), B), C), D), E) yazma.
+- correct_answer yalnızca A, B, C, D veya E olsun.
+- JSON dışında hiçbir şey döndürme.
 
-            raise ValueError(
+ÖNCEKİ SORULAR:
+{previous_questions}
 
-                f"{question_number}. soru oluşturulamadı."
+KAYNAK METİN:
+{fallback_context}
+"""
+            print(f"Ollama soru {question_number} fallback üretimi başladı")
+            fallback_started_at = time.perf_counter()
 
+            try:
+                raw_response = _generate_with_ollama(
+                    fallback_prompt,
+                    json_schema=quiz_json_schema,
+                    num_predict=400,
+                )
+                generated = OllamaQuizQuestion.model_validate(
+                    json.loads(raw_response)
+                )
+                _validate_ollama_source_fact(generated)
+                generated_question = _to_quiz_question(generated)
+                _validate_quiz(
+                    QuizResponse(questions=[generated_question]),
+                    1,
+                    previous_question_texts=[
+                        question.question_text for question in questions
+                    ],
+                )
+            except (json.JSONDecodeError, ValueError) as error:
+                generated_question = None
+                print(
+                    f"Ollama soru {question_number} fallback doğrulama "
+                    f"hatası: {error}"
+                )
+            finally:
+                fallback_duration = time.perf_counter() - fallback_started_at
+                print(
+                    f"Ollama soru {question_number} fallback üretim süresi: "
+                    f"{fallback_duration:.1f} sn"
+                )
+
+        if generated_question is None:
+            alternate_context = _select_alternate_context(
+                quiz_source,
+                used_context_starts,
             )
+            alternate_prompt = f"""
+Farklı kaynak bölümünden yalnızca açıkça desteklenen tek bir kavram seç.
+- source_fact alanına kaynaktan 1-2 kısa cümlelik doğrudan bilgiyi yaz.
+- Soruyu ve doğru cevabı yalnızca source_fact üzerinden oluştur.
+- Doğru cevabı source_fact ile kanıtlayamıyorsan daha basit bilgi seç.
+- Yalnızca 1 bağımsız multiple-choice soru üret.
+- 5 anlamlı ve farklı seçenek üret; yalnızca biri doğru olsun.
+- Doğru/yanlış formatı, alt soru veya açık uçlu görev kullanma.
+- Belirsiz soru kökü kullanma.
+- Önceki sorulara benzemeyen basit bir kavram seç.
+- Emin değilsen daha basit başka bir kavram seç.
+- options içine A), B), C), D), E) yazma.
+- correct_answer yalnızca A, B, C, D veya E olsun.
+- JSON dışında hiçbir şey döndürme.
+
+ÖNCEKİ SORULAR:
+{previous_questions}
+
+FARKLI KAYNAK BÖLÜMÜ:
+{alternate_context}
+"""
+            print(
+                f"Ollama soru {question_number} "
+                "alternate context retry başladı"
+            )
+            alternate_started_at = time.perf_counter()
+
+            try:
+                raw_response = _generate_with_ollama(
+                    alternate_prompt,
+                    json_schema=quiz_json_schema,
+                    num_predict=400,
+                )
+                generated = OllamaQuizQuestion.model_validate(
+                    json.loads(raw_response)
+                )
+                _validate_ollama_source_fact(generated)
+                generated_question = _to_quiz_question(generated)
+                _validate_quiz(
+                    QuizResponse(questions=[generated_question]),
+                    1,
+                    previous_question_texts=[
+                        question.question_text for question in questions
+                    ],
+                )
+            except (json.JSONDecodeError, ValueError) as error:
+                generated_question = None
+                print(
+                    f"Ollama soru {question_number} alternate context "
+                    f"retry doğrulama hatası: {error}"
+                )
+                raise OllamaServiceError(
+                    "Yapay zeka geçerli bir yanıt oluşturamadı."
+                ) from error
+            finally:
+                alternate_duration = time.perf_counter() - alternate_started_at
+                print(
+                    f"Ollama soru {question_number} alternate context "
+                    f"retry süresi: {alternate_duration:.1f} sn"
+                )
 
         questions.append(generated_question)
+        question_duration = time.perf_counter() - question_started_at
+        print(
+            f"Ollama soru {question_number} üretim süresi: "
+            f"{question_duration:.1f} sn"
+        )
 
-    quiz = QuizResponse(
+    quiz = QuizResponse(questions=questions)
+    quiz = _validate_quiz(quiz, question_count)
 
-        questions=questions
-
-    )
-
-    quiz = _validate_quiz(
-
-        quiz,
-
-        question_count
-
-    )
-
+    total_duration = time.perf_counter() - quiz_started_at
     print(
-
-        f"Ollama Quiz başarıyla oluşturuldu. "
-
-        f"Soru sayısı: {len(quiz.questions)}"
-
+        f"Ollama Quiz tamamlandı: {len(quiz.questions)} soru, "
+        f"toplam {total_duration:.1f} sn"
     )
 
     return quiz
@@ -367,8 +1041,7 @@ if __name__ == "__main__":
     Bir olayın olasılığı 0 ile 1 arasında değer alır.
     Kesin olayın olasılığı 1, imkansız olayın olasılığı 0'dır.
 
-    Örneğin adil bir zar atıldığında
-    6 gelme olasılığı 1/6'dır.
+    Örneğin adil bir zar atıldığında 6 gelme olasılığı 1/6'dır.
     """
 
     result = generate_quiz(
@@ -376,9 +1049,7 @@ if __name__ == "__main__":
         3
     )
 
-    print(
-        "\n===== QUIZ TEST ====="
-    )
+    print("\n===== QUIZ TEST =====")
 
     for i, question in enumerate(
         result.questions,
@@ -435,7 +1106,6 @@ if __name__ == "__main__":
 
 # =========================================================
 # AI FLASHCARD OLUŞTURMA
-# ŞİMDİLİK GEMINI
 # =========================================================
 
 class FlashcardItem(BaseModel):
@@ -451,111 +1121,56 @@ def generate_flashcards(
     text: str,
     flashcard_count: int = 10
 ):
-    flashcards = []
 
-    for card_number in range(1, flashcard_count + 1):
+    prompt = f"""
+Aşağıdaki ders notuna göre {flashcard_count} adet flashcard oluştur.
 
-        prompt = f"""
-Sen StudyFlow AI adlı öğrenme platformunun
-bilgi kartı hazırlama asistanısın.
+Kurallar:
 
-Aşağıdaki ders notuna dayanarak SADECE 1 adet
-bilgi kartı oluştur.
-
-Bu kart toplam {flashcard_count} kartın
-{card_number}. kartıdır.
-
-KURALLAR:
-
-- Yalnızca 1 bilgi kartı oluştur.
-- question alanı dolu olmalıdır.
-- answer alanı dolu olmalıdır.
-- question SADECE tek bir soru içermelidir.
-- question kısa ve tek bir soru olmalıdır.
-- Gereksiz uzun soru yazma.
-- answer SADECE sorunun doğrudan cevabını içermelidir.
-- answer en fazla 40 kelime olmalıdır.
-- Uzun açıklama yazma.
-- Özet oluşturma.
-- Madde listesi oluşturma.
-- Numaralı liste oluşturma.
-- Markdown kullanma.
-- Başlık veya liste biçimlendirmesi kullanma.
-- Bir kartta yalnızca bir kavram veya bilgiyi ölç.
-- Kart yalnızca verilen ders notuna dayanmalıdır.
+- Sorular yalnızca verilen ders notundaki bilgilere dayanmalı.
 - Bilgi uydurma.
-- Ders notunda olmayan bilgi ekleme.
-- Ders notunun diliyle aynı dilde oluştur.
-DERS NOTU:
+- Her soru farklı bir kavramı veya önemli bilgiyi ölçmeli.
+- Sorular kısa ve anlaşılır olmalı.
+- Cevaplar kısa ama yeterince açıklayıcı olmalı.
+- Türkçe yaz.
+- Flashcard'lar sınava hazırlanmak için kullanılabilecek nitelikte olmalı.
+- Gereksiz ayrıntılardan kaçın.
+- Aynı bilgiyi tekrar eden kartlar oluşturma.
+
+Ders Notu:
 
 {text[:30000]}
+
+Yalnızca aşağıdaki yapıda geçerli JSON döndür:
+
+{{
+  "flashcards": [
+    {{
+      "question": "...",
+      "answer": "..."
+    }}
+  ]
+}}
 """
 
-        max_attempts = 3
-        generated_card = None
+    try:
+        raw_response = _generate_with_ollama(prompt, json_response=True)
+        result = FlashcardResponse.model_validate(json.loads(raw_response))
+    except (json.JSONDecodeError, ValueError) as error:
+        raise OllamaServiceError(
+            "Yapay zeka geçerli bir yanıt oluşturamadı."
+        ) from error
 
-        for attempt in range(1, max_attempts + 1):
-
-            try:
-                raw_response = generate_with_ollama(
-                    prompt,
-                    response_schema=FlashcardItem.model_json_schema(),
-                )
-
-                generated_card = FlashcardItem.model_validate_json(
-                    raw_response
-                )
-
-                if not generated_card.question.strip():
-                    raise ValueError(
-                        "Bilgi kartı sorusu boş."
-                    )
-
-                if not generated_card.answer.strip():
-                    raise ValueError(
-                        "Bilgi kartı cevabı boş."
-                    )
-                
-                if len(generated_card.answer.split()) > 40:
-                    raise ValueError(
-                        "Bilgi kartı cevabı çok uzun."
-                    )
-
-                break
-
-            except Exception as error:
-                print(
-                    f"Ollama {card_number}. bilgi kartı hatası "
-                    f"(deneme {attempt}/{max_attempts}): {error}"
-                )
-
-                if attempt == max_attempts:
-                    raise ValueError(
-                        f"{card_number}. bilgi kartı oluşturulamadı."
-                    ) from error
-
-        if generated_card is None:
-            raise ValueError(
-                f"{card_number}. bilgi kartı oluşturulamadı."
-            )
-
-        flashcards.append(generated_card)
-
-    result = FlashcardResponse(
-        flashcards=flashcards
-    )
-
-    print(
-        f"Ollama Bilgi Kartları başarıyla oluşturuldu. "
-        f"Kart sayısı: {len(result.flashcards)}"
-    )
+    if len(result.flashcards) != flashcard_count:
+        raise OllamaServiceError(
+            "Yapay zeka geçerli bir yanıt oluşturamadı."
+        )
 
     return result
 
 
 # =========================================================
 # AI ÇALIŞMA ÖNERİSİ
-# ŞİMDİLİK GEMINI
 # =========================================================
 
 class StudyRecommendation(BaseModel):
@@ -570,7 +1185,7 @@ def generate_study_recommendation(
     quiz_average: float,
     total_flashcards: int,
     flashcard_reviews: int,
-    weakest_course: Optional[str] = None,
+    weakest_course: Optional[str] = None,    
     study_hours: float = 0
 ):
 
@@ -599,8 +1214,7 @@ Kurallar:
 - Eğer flashcard tekrarları düşükse tekrar yapmasını öner.
 - En zayıf ders belli ise önceliği o derse ver.
 - Çalışma süresi düşükse uygulanabilir bir çalışma süresi öner.
-- Priority değeri yalnızca
-  "low", "medium" veya "high" olabilir.
+- Priority değeri yalnızca "low", "medium" veya "high" olabilir.
 
 message alanında öğrencinin mevcut durumunu
 kısa şekilde açıkla.
@@ -609,30 +1223,25 @@ recommended_action alanında öğrencinin bugün
 uygulayabileceği somut bir çalışma görevi ver.
 """
 
-    raw_response = generate_with_ollama(
-        prompt,
-        response_schema=StudyRecommendation.model_json_schema(),
-)
+    response = client.models.generate_content(
+        model="gemini-3.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=StudyRecommendation,
+        ),
+    )
 
-    result = StudyRecommendation.model_validate_json(
-    raw_response
-)
-
-    return result
-
-  
-
+    return response.parsed
 
 # =========================================================
 # PDF ÜZERİNDEN AI SOHBET
-# ŞİMDİLİK GEMINI
 # =========================================================
 
 def ask_ai_about_document(
     document_text: str,
     question: str
 ):
-
     prompt = f"""
 Sen StudyFlow AI adlı kişisel öğrenme platformunun
 ders asistanısın.
@@ -640,33 +1249,31 @@ ders asistanısın.
 Aşağıdaki ders notunu kaynak olarak kullanarak
 öğrencinin sorusunu cevapla.
 
-KURALLAR:
-
+Kurallar:
 - Yalnızca verilen ders notundaki bilgilere dayan.
-- Ders notunda cevap yoksa açıkça belirt.
+- Ders notunda cevap yoksa bunu açıkça belirt.
 - Bilgi uydurma.
-- Sorunun dilini ve ders notunun dilini dikkate al.
-- Cevabı mümkün olduğunca aynı dilde ver.
+- Türkçe cevap ver.
 - Anlaşılır ve öğretici ol.
 - Gereksiz uzun cevap verme.
-- Konuyla ilgisiz bilgi ekleme.
-- Gereksiz giriş ve kapanış cümleleri yazma.
 
 DERS NOTU:
-
 {document_text[:30000]}
 
 ÖĞRENCİNİN SORUSU:
-
 {question}
 """
 
-    return generate_with_ollama(prompt)
+    response = client.models.generate_content(
+        model="gemini-3.5-flash",
+        contents=prompt,
+    )
+
+    return response.text
 
 
 # =========================================================
 # AI ÇALIŞMA PLANI OLUŞTURMA
-# ŞİMDİLİK GEMINI
 # =========================================================
 
 class StudyPlanItem(BaseModel):
@@ -681,12 +1288,34 @@ class PlannerResponse(BaseModel):
     general_advice: str
 
 
+class PlannerServiceUnavailableError(Exception):
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__("Gemini planner service is temporarily unavailable.")
+
+
+def _transient_gemini_status(error: errors.APIError) -> Optional[int]:
+    code = getattr(error, "code", None)
+
+    if code in (429, 503):
+        return code
+
+    message = str(error).upper()
+
+    if "RESOURCE_EXHAUSTED" in message or "RATE LIMIT" in message:
+        return 429
+
+    if "UNAVAILABLE" in message:
+        return 503
+
+    return None
+
+
 def generate_study_plan(
     courses,
     events,
     goals,
     available_hours_per_day: float,
-    target_gpa: float,
     weekly_hours_target: float
 ):
 
@@ -697,7 +1326,6 @@ def generate_study_plan(
     course_info = []
 
     for course in courses:
-
         course_info.append({
             "id": course.id,
             "name": course.name,
@@ -711,18 +1339,11 @@ def generate_study_plan(
     event_info = []
 
     for event in events:
-
         event_info.append({
             "title": event.title,
             "event_type": event.event_type,
-            "start_date": str(
-                event.start_date
-            ),
-            "end_date": (
-                str(event.end_date)
-                if event.end_date
-                else None
-            ),
+            "start_date": str(event.start_date),
+            "end_date": str(event.end_date) if event.end_date else None,
             "course_id": event.course_id
         })
 
@@ -733,18 +1354,13 @@ def generate_study_plan(
     goal_info = []
 
     for goal in goals:
-
         goal_info.append({
             "title": goal.title,
             "goal_type": goal.goal_type,
             "target_value": goal.target_value,
             "current_value": goal.current_value,
-            "start_date": str(
-                goal.start_date
-            ),
-            "end_date": str(
-                goal.end_date
-            ),
+            "start_date": str(goal.start_date),
+            "end_date": str(goal.end_date),
             "completed": goal.completed,
             "course_id": goal.course_id
         })
@@ -774,14 +1390,15 @@ def generate_study_plan(
         daily_limit_minutes * 7
     )
 
+    # Haftalık hedef günlük kapasiteden büyükse
+    # AI'ya gerçekçi maksimum süreyi bildiriyoruz.
     effective_weekly_target_minutes = min(
         weekly_target_minutes,
         maximum_weekly_minutes
     )
 
     effective_weekly_target_hours = (
-        effective_weekly_target_minutes
-        / 60
+        effective_weekly_target_minutes / 60
     )
 
     # ---------------------------------------------------------
@@ -809,16 +1426,13 @@ Günlük maksimum çalışma süresi:
 Öğrencinin haftalık çalışma hedefi:
 {weekly_hours_target} saat
 
-Öğrencinin uygulanabilir maksimum
-haftalık çalışma kapasitesi:
+Öğrencinin uygulanabilir maksimum haftalık çalışma kapasitesi:
 {maximum_weekly_minutes} dakika
 
 Planlanması gereken haftalık çalışma süresi:
 {effective_weekly_target_minutes} dakika
 ({effective_weekly_target_hours} saat)
 
-Hedef GPA:
-{target_gpa}
 
 ==================================================
 ÖĞRENCİNİN DERSLERİ
@@ -826,17 +1440,20 @@ Hedef GPA:
 
 {course_info}
 
+
 ==================================================
 YAKLAŞAN ETKİNLİKLER
 ==================================================
 
 {event_info}
 
+
 ==================================================
 ÖĞRENCİNİN AKTİF HEDEFLERİ
 ==================================================
 
 {goal_info}
+
 
 ==================================================
 PLANLAMA KURALLARI
@@ -854,28 +1471,40 @@ PLANLAMA KURALLARI
    Pazar
 
 3. Günlük toplam çalışma süresi
-   {daily_limit_minutes} dakikayı
-   kesinlikle geçmemelidir.
+   {daily_limit_minutes} dakikayı kesinlikle geçmemelidir.
 
 4. Haftalık toplam çalışma süresi
-   mümkün olduğunca
-   {effective_weekly_target_minutes}
-   dakika olmalıdır.
+   mümkün olduğunca tam olarak
+   {effective_weekly_target_minutes} dakika olmalıdır.
 
 5. Haftalık hedef günlük kapasiteden büyükse,
    günlük kapasiteyi aşma.
+   Bu durumda maksimum uygulanabilir süreyi kullan.
 
-6. Dersleri yalnızca öğrencinin
-   gerçek ders listesinden seç.
+6. Dersleri yalnızca öğrencinin gerçek
+   ders listesinden seç.
 
-7. Öğrencinin ders listesinde olmayan
-   hiçbir ders oluşturma.
+7. Öğrencinin ders listesinde olmayan hiçbir
+   ders oluşturma.
 
-8. Ders isimlerini birleştirme.
+8. Ders isimlerini kesinlikle birleştirme.
 
-9. Her plan öğesinde yalnızca bir ders bulunmalıdır.
+   Örneğin:
 
-10. Bir güne birden fazla çalışma kaydı koyabilirsin.
+   YANLIŞ:
+   "Matematik ve Veri Yapıları"
+
+   DOĞRU:
+   "Matematik"
+
+   veya:
+
+   "Veri Yapıları"
+
+9. Her plan öğesinde yalnızca BİR ders bulunmalıdır.
+
+10. Bir güne birden fazla çalışma kaydı
+    koyabilirsin.
 
 11. Yaklaşan sınavlara öncelik ver.
 
@@ -885,51 +1514,60 @@ PLANLAMA KURALLARI
 
 14. Aktif hedefleri dikkate al.
 
-15. Hedef GPA'yı dikkate al.
+15. Dersleri mümkün olduğunca dengeli dağıt.
 
-16. Dersleri mümkün olduğunca dengeli dağıt.
+16. Aynı dersi gereksiz şekilde her güne koyma.
 
-17. Aynı dersi gereksiz şekilde her güne koyma.
+17. Ancak yaklaşan sınav veya önemli bir
+    deadline varsa ilgili derse daha fazla
+    çalışma süresi ayırabilirsin.
 
-18. Önemli deadline varsa ilgili derse
-    daha fazla zaman ayırabilirsin.
+18. Konu bilgisi verilmediği için konu
+    uydurma.
 
-19. Konu bilgisi verilmediği için konu uydurma.
+19. Output içinde topics alanı bulunmayacaktır.
 
-20. topics alanı kullanma.
+20. Her çalışma kaydının duration_minutes
+    değeri gerçekçi olmalıdır.
 
-21. duration_minutes gerçekçi olmalıdır.
+21. Çalışma süreleri dakika cinsinden olmalıdır.
 
-22. Çalışma süreleri dakika cinsinden olmalıdır.
+22. Her gün mutlaka çalışma kaydı oluşturmak
+    zorunda değilsin.
 
-23. Her gün çalışma olmak zorunda değildir.
+23. Fakat 7 günlük plan içerisinde toplam
+    çalışma süresini haftalık hedefe
+    mümkün olduğunca tam olarak ulaştır.
 
-24. Haftalık hedefe mümkün olduğunca yaklaş.
+24. Tamamlanmış hedefleri dikkate alma.
 
-25. Tamamlanmış hedefleri dikkate alma.
+25. Tamamlanmış eventleri dikkate alma.
 
-26. Tamamlanmış eventleri dikkate alma.
+26. Verilmeyen bilgileri uydurma.
 
-27. Verilmeyen bilgileri uydurma.
+27. general_advice içerisinde yanlış bir
+    haftalık toplam süre belirtme.
 
-28. general_advice içinde yanlış toplam süre verme.
+28. Planın toplam süresini hesaplarken
+    duration_minutes değerlerini dikkate al.
 
-29. duration_minutes değerlerini kullanarak
-    toplam süreyi hesapla.
-
-30. Haftalık hedef:
+29. Haftalık hedef:
     {effective_weekly_target_minutes} dakika.
 
-31. Bu hedefi aşma.
+30. Bu hedefi aşma.
+
+31. Mümkünse bu hedefin altında da kalma.
+
 
 ==================================================
 GEÇERLİ DERSLER
 ==================================================
 
-course alanı SADECE aşağıdaki
-değerlerden biri olabilir:
+course alanı SADECE aşağıdaki değerlerden
+biri olabilir:
 
 {course_names}
+
 
 ==================================================
 ÇIKTI KURALLARI
@@ -937,38 +1575,58 @@ değerlerden biri olabilir:
 
 JSON dışında hiçbir şey döndürme.
 
-weekly_plan içerisindeki her nesne
-şu alanlara sahip olmalıdır:
+weekly_plan içerisindeki her nesne şu alanlara
+sahip olmalıdır:
 
-day
-course
-duration_minutes
-reason
+- day
+- course
+- duration_minutes
+- reason
 
-topics alanı kullanma.
+topics ALANI KULLANMA.
 
-Her nesnede yalnızca bir ders bulunmalıdır.
+Her nesnede yalnızca bir ders olmalıdır.
 
-course değeri yalnızca gerçek derslerden
+course değeri yukarıdaki gerçek derslerden
 biri olmalıdır.
 
 duration_minutes pozitif bir sayı olmalıdır.
 
 general_advice kısa ve Türkçe olmalıdır.
+
+Plan öğrencinin günlük ve haftalık çalışma
+kapasitesini aşmamalıdır.
 """
 
     # ---------------------------------------------------------
     # GEMINI
     # ---------------------------------------------------------
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=PlannerResponse,
-        ),
-    )
+    maximum_attempts = 3
+
+    for attempt in range(1, maximum_attempts + 1):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=PlannerResponse,
+                ),
+            )
+            break
+        except errors.APIError as error:
+            transient_status = _transient_gemini_status(error)
+
+            if transient_status is None:
+                raise
+
+            if attempt == maximum_attempts:
+                raise PlannerServiceUnavailableError(
+                    transient_status
+                ) from error
+
+            time.sleep(2 ** (attempt - 1))
 
     # ---------------------------------------------------------
     # AI CEVABI KONTROL
@@ -976,21 +1634,12 @@ general_advice kısa ve Türkçe olmalıdır.
 
     if response.parsed is None:
 
-        print(
-            "AI PLANNER RESPONSE PARSED NONE"
-        )
-
-        print(
-            "AI RESPONSE TEXT:"
-        )
-
-        print(
-            response.text
-        )
+        print("AI PLANNER RESPONSE PARSED NONE")
+        print("AI RESPONSE TEXT:")
+        print(response.text)
 
         raise ValueError(
-            "AI Planner geçerli bir plan "
-            "oluşturamadı."
+            "AI Planner geçerli bir plan oluşturamadı."
         )
 
     result = response.parsed
@@ -999,40 +1648,32 @@ general_advice kısa ve Türkçe olmalıdır.
     # BACKEND KONTROLLERİ
     # ---------------------------------------------------------
 
-    valid_course_names = set(
-        course_names
-    )
+    valid_course_names = set(course_names)
 
     total_minutes = 0
 
     for item in result.weekly_plan:
 
+        # Geçersiz ders kontrolü
         if item.course not in valid_course_names:
 
             raise ValueError(
-                f"AI geçersiz bir ders oluşturdu: "
-                f"{item.course}"
+                f"AI geçersiz bir ders oluşturdu: {item.course}"
             )
 
-        total_minutes += (
-            item.duration_minutes
-        )
+        # Günlük limit kontrolü daha aşağıda
+        total_minutes += item.duration_minutes
 
     # ---------------------------------------------------------
     # HAFTALIK TOPLAM KONTROLÜ
     # ---------------------------------------------------------
 
-    if (
-        total_minutes
-        > effective_weekly_target_minutes
-    ):
+    if total_minutes > effective_weekly_target_minutes:
 
         raise ValueError(
             f"AI haftalık çalışma hedefini aştı. "
-            f"Hedef: "
-            f"{effective_weekly_target_minutes} dakika, "
-            f"oluşturulan: "
-            f"{total_minutes} dakika."
+            f"Hedef: {effective_weekly_target_minutes} dakika, "
+            f"oluşturulan: {total_minutes} dakika."
         )
 
     # ---------------------------------------------------------
@@ -1044,10 +1685,7 @@ general_advice kısa ve Türkçe olmalıdır.
     for item in result.weekly_plan:
 
         daily_totals[item.day] = (
-            daily_totals.get(
-                item.day,
-                0
-            )
+            daily_totals.get(item.day, 0)
             + item.duration_minutes
         )
 
@@ -1056,8 +1694,7 @@ general_advice kısa ve Türkçe olmalıdır.
         if total > daily_limit_minutes:
 
             raise ValueError(
-                f"{day} günü günlük çalışma "
-                f"limitini aşıyor. "
+                f"{day} günü günlük çalışma limitini aşıyor. "
                 f"Limit: {daily_limit_minutes} dakika, "
                 f"oluşturulan: {total} dakika."
             )
@@ -1068,8 +1705,7 @@ general_advice kısa ve Türkçe olmalıdır.
 
     print(
         f"AI Planner oluşturuldu. "
-        f"Haftalık toplam: "
-        f"{total_minutes} dakika / "
+        f"Haftalık toplam: {total_minutes} dakika / "
         f"{effective_weekly_target_minutes} dakika"
     )
 

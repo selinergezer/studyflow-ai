@@ -10,7 +10,7 @@ from app.models.user import User
 from app.models.achievement import Achievement
 
 from app.core.security import get_current_user
-from app.services.ai_service import generate_quiz
+from app.services.ai_service import OllamaServiceError, generate_quiz
 
 from app.schemas.quiz import QuizSubmit
 from app.models.quiz_attempt import QuizAttempt
@@ -61,10 +61,13 @@ def generate_quiz_endpoint(
         )
 
     # PDF metninden AI ile quiz oluştur
-    generated_quiz = generate_quiz(
-        document.text,
-        question_count
-    )
+    try:
+        generated_quiz = generate_quiz(
+            document.text,
+            question_count
+        )
+    except OllamaServiceError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
     # Quiz kaydı oluştur
     quiz = Quiz(
