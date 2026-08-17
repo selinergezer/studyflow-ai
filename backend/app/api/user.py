@@ -12,8 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.models.user import User
-from app.schemas.user import UserCreate
-
+from app.schemas.user import UserCreate, ChangePassword
 from app.core.security import hash_password
 
 from sqlalchemy import select
@@ -251,4 +250,33 @@ def get_me(current_user: User = Depends(get_current_user)):
         "id": current_user.id,
         "username": current_user.username,
         "email": current_user.email
+    }
+
+@router.post("/change-password")
+def change_password(
+    data: ChangePassword,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not verify_password(
+        data.current_password,
+        current_user.password
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Mevcut şifreniz hatalı."
+        )
+
+    if data.current_password == data.new_password:
+        raise HTTPException(
+            status_code=400,
+            detail="Yeni şifre mevcut şifrenizden farklı olmalıdır."
+        )
+
+    current_user.password = hash_password(data.new_password)
+
+    db.commit()
+
+    return {
+        "message": "Şifreniz başarıyla değiştirildi."
     }
