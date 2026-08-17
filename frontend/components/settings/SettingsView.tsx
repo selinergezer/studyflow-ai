@@ -166,18 +166,46 @@ export default function SettingsView() {
     }
   }
 
-  function submitPassword(event: React.FormEvent) {
-    event.preventDefault();
-    if (!currentPassword || !newPassword || !newPasswordAgain) {
-      setModalError(t("fillAllPasswordFields"));
-      return;
-    }
-    if (newPassword !== newPasswordAgain) {
-      setModalError(t("passwordsDoNotMatch"));
-      return;
-    }
-    setModalError(null);
+  async function submitPassword(event: React.FormEvent) {
+  event.preventDefault();
+
+  if (!currentPassword || !newPassword || !newPasswordAgain) {
+    setModalError(t("fillAllPasswordFields"));
+    return;
   }
+
+  if (newPassword !== newPasswordAgain) {
+    setModalError(t("passwordsDoNotMatch"));
+    return;
+  }
+
+  setModalError(null);
+
+  try {
+    const response = await apiFetch<{ message: string }>("/users/change-password", {
+      method: "POST",
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    });
+
+    setCurrentPassword("");
+    setNewPassword("");
+    setNewPasswordAgain("");
+
+    setNotice(
+      language === "tr"
+        ? response.message
+        : "Password changed successfully."
+    );
+
+    setModal(null);
+  } catch (error) {
+    console.error(error);
+    setModalError(apiErrorMessage(error));
+  }
+}
 
   function confirmModal() {
     if (modal === "history" || modal === "materials") setNotice(t("requestConfirmed"));
@@ -281,7 +309,6 @@ export default function SettingsView() {
               <Input id="new-password" type="password" autoComplete="new-password" label={language === "tr" ? "Yeni şifre" : "New password"} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required />
               <Input id="new-password-again" type="password" autoComplete="new-password" label={language === "tr" ? "Yeni şifre tekrar" : "Confirm new password"} value={newPasswordAgain} onChange={(event) => setNewPasswordAgain(event.target.value)} required />
             </div>
-            <p className="mt-4 rounded-xl bg-gray-50 p-3 text-sm leading-6 text-gray-600">{t("passwordChangeUnsupported")}</p>
             {modalError ? <p className="mt-4 text-sm text-red-600" role="alert">{modalError}</p> : null}
             <div className="mt-6 flex justify-end gap-2"><Button variant="secondary" onClick={() => setModal(null)}>{t("cancel")}</Button><Button type="submit">{language === "tr" ? "Şifreyi Değiştir" : "Change Password"}</Button></div>
           </form> : null}
