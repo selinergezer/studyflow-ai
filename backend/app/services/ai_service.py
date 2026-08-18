@@ -1060,27 +1060,63 @@ def generate_flashcards(
     text: str,
     flashcard_count: int = 10
 ):
+    flashcard_started_at = time.perf_counter()
+
+    max_context_chars = 18000
+
+    if len(text) <= max_context_chars:
+        context = text
+    else:
+        chunk_size = max_context_chars // 3
+
+        start_chunk = text[:chunk_size]
+
+        middle_start = max(
+            0,
+            (len(text) // 2) - (chunk_size // 2)
+        )
+        middle_chunk = text[
+            middle_start:middle_start + chunk_size
+        ]
+
+        end_chunk = text[-chunk_size:]
+
+        context = (
+            start_chunk
+            + "\n\n--- MIDDLE SECTION ---\n\n"
+            + middle_chunk
+            + "\n\n--- FINAL SECTION ---\n\n"
+            + end_chunk
+        )
+
+    schema = FlashcardResponse.model_json_schema()
 
     prompt = f"""
-Aşağıdaki ders notuna göre {flashcard_count} adet flashcard oluştur.
+Create EXACTLY {flashcard_count} flashcards using only the course material below.
 
-Kurallar:
+RULES:
 
-- Sorular yalnızca verilen ders notundaki bilgilere dayanmalı.
-- Bilgi uydurma.
-- Her soru farklı bir kavramı veya önemli bilgiyi ölçmeli.
-- Sorular kısa ve anlaşılır olmalı.
-- Cevaplar kısa ama yeterince açıklayıcı olmalı.
-- Türkçe yaz.
-- Flashcard'lar sınava hazırlanmak için kullanılabilecek nitelikte olmalı.
-- Gereksiz ayrıntılardan kaçın.
-- Aynı bilgiyi tekrar eden kartlar oluşturma.
+- Create exactly {flashcard_count} flashcards.
+- Use only information explicitly supported by the course material.
+- Do not invent facts.
+- Preserve the language of the source material.
+- If the source is English, write the flashcards in English.
+- If the source is Turkish, write the flashcards in Turkish.
+- Each flashcard must test a different important concept.
+- Avoid duplicate or nearly identical flashcards.
+- Questions should be short, clear and understandable on their own.
+- Answers should be concise but sufficiently explanatory.
+- Do not create questions whose answers cannot be directly supported by the source.
+- Prefer definitions, concepts, responsibilities, relationships, processes and key facts.
+- Avoid unnecessary detail.
+- Return valid JSON only.
+- Do not return markdown or explanatory text outside the JSON.
 
-Ders Notu:
+COURSE MATERIAL:
 
-{text[:30000]}
+{context}
 
-Yalnızca aşağıdaki yapıda geçerli JSON döndür:
+Return only this structure:
 
 {{
   "flashcards": [
@@ -1092,20 +1128,163 @@ Yalnızca aşağıdaki yapıda geçerli JSON döndür:
 }}
 """
 
-    try:
-        raw_response = _generate_with_ollama(prompt, json_response=True)
-        result = FlashcardResponse.model_validate(json.loads(raw_response))
-    except (json.JSONDecodeError, ValueError) as error:
-        raise OllamaServiceError(
-            "Yapay zeka geçerli bir yanıt oluşturamadı."
-        ) from error
+    max_attempts = 2
+    last_error = None
 
-    if len(result.flashcards) != flashcard_count:
-        raise OllamaServiceError(
-            "Yapay zeka geçerli bir yanıt oluşturamadı."
-        )
+    for attempt in range(1, max_attempts + 1):
+        attempt_started_at = time.perf_counter()
 
-    return result
+        try:
+            num_predict = min(
+                4000,
+                max(700, flashcard_count * 180)
+            )
+
+            raw_response = _generate_with_ollama(
+                prompt,
+                json_schema=schema,
+                num_predict=num_predict,
+            )
+
+            result = FlashcardResponse.model_validate(
+                json.loads(raw_response)
+            )
+
+            if len(result.flashcards) < flashcard_count:
+                missing_count = flashcard_count - len(result.flashcards)
+
+                existing_cards = "\n".join(
+                    f"- {card.question} -> {card.answer}"
+                    for card in result.flashcards
+                )
+
+                completion_prompt = f"""
+            The previous generation produced only {len(result.flashcards)}
+            flashcards instead of {flashcard_count}.
+            
+            Create EXACTLY {missing_count} ADDITIONAL flashcards.
+
+            RULES:
+            - Use only the course material below.
+            - Do not invent information.
+            - Do not repeat any of the existing flashcards.
+            - Each new flashcard must test a different important concept.
+            - Preserve the language of the source material.
+            - Questions must be short and clear.
+            - Answers must be concise but sufficiently explanatory.
+            - Return valid JSON only.
+            - Return EXACTLY {missing_count} flashcards.
+
+            EXISTING FLASHCARDS:
+
+            {existing_cards}
+
+            COURSE MATERIAL:
+
+            {context}
+
+            Return only:
+
+            {{
+              "flashcards": [
+                {{
+                  "question": "...",
+                  "answer": "..."
+                 }}
+               ]
+            }}
+            """
+
+                completion_schema = {
+                    "type": "object",
+                    "properties": {
+                        "flashcards": {
+                            "type": "array",
+                            "minItems": missing_count,
+                            "maxItems": missing_count,
+                            "items": FlashcardItem.model_json_schema(),
+                         }
+                    },
+                    "required": ["flashcards"],
+                    "additionalProperties": False,
+                }
+
+                completion_response = _generate_with_ollama(
+                    completion_prompt,
+                    json_schema=completion_schema,
+                    num_predict=max(500, missing_count * 180),
+                )
+
+                completion_result = FlashcardResponse.model_validate(
+                    json.loads(completion_response)
+                )
+
+                result.flashcards.extend(completion_result.flashcards)
+
+            if len(result.flashcards) != flashcard_count:
+                raise ValueError(
+                    f"{flashcard_count} flashcard bekleniyordu, "
+                    f"{len(result.flashcards)} üretildi."
+                )
+
+            normalized_questions = [
+                card.question.strip().lower()
+                for card in result.flashcards
+            ]
+
+            if len(set(normalized_questions)) != len(normalized_questions):
+                raise ValueError(
+                    "Tekrarlanan flashcard soruları üretildi."
+                )
+
+            attempt_duration = (
+                time.perf_counter() - attempt_started_at
+            )
+
+            total_duration = (
+                time.perf_counter() - flashcard_started_at
+            )
+
+            print(
+                f"Ollama Flashcard tamamlandı: "
+                f"{len(result.flashcards)} kart, "
+                f"AI süresi {attempt_duration:.1f} sn, "
+                f"toplam {total_duration:.1f} sn"
+            )
+
+            return result
+
+        except (
+            json.JSONDecodeError,
+            ValueError,
+        ) as error:
+            last_error = error
+
+            duration = (
+                time.perf_counter() - attempt_started_at
+            )
+
+            print(
+                f"Ollama flashcard doğrulama hatası "
+                f"(deneme {attempt}/{max_attempts}, "
+                f"{duration:.1f} sn): {error}"
+            )
+
+            prompt += f"""
+
+THE PREVIOUS OUTPUT WAS INVALID.
+
+Error:
+{error}
+
+Generate the flashcards again.
+Return EXACTLY {flashcard_count} unique flashcards.
+Return JSON only.
+"""
+
+    raise OllamaServiceError(
+        "Yapay zeka geçerli bilgi kartları oluşturamadı."
+    ) from last_error
 
 
 # =========================================================
