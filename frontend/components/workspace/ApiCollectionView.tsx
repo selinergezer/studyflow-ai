@@ -66,7 +66,7 @@ export default function ApiCollectionView({
         apiFetch<Quiz[]>("/quizzes/", { signal: controller.signal }),
         apiFetch<DocumentData[]>("/documents/", { signal: controller.signal }),
       ])
-        .then(async ([quizData, documentData]) => {
+        .then(([quizData, documentData]) => {
           const uniqueQuizzes = [
             ...new Map(
               quizData
@@ -74,19 +74,10 @@ export default function ApiCollectionView({
                 .map((quiz) => [quiz.id as number, quiz])
             ).values(),
           ];
-          const quizzesWithCounts = await Promise.all(uniqueQuizzes.map(async (quiz) => {
-            if (quiz.id == null || quiz.question_count != null) return quiz;
-            try {
-              const detail = await apiFetch<Quiz>(`/quizzes/${quiz.id}`, { signal: controller.signal });
-              return { ...quiz, question_count: detail.questions?.length ?? 0 };
-            } catch (cause) {
-              if (isAbortError(cause)) throw cause;
-              return quiz;
-            }
-          }));
 
-          setQuizzes(quizzesWithCounts);
+          setQuizzes(uniqueQuizzes);
           setDocuments(documentData);
+          
           const requestedDocumentId = Number(new URLSearchParams(window.location.search).get("document_id"));
           if (Number.isInteger(requestedDocumentId) && documentData.some((document) => (document.id ?? document.document_id) === requestedDocumentId)) {
             setSelectedDocumentId(requestedDocumentId);
