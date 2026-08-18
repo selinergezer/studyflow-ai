@@ -53,6 +53,9 @@ export default function WorkspaceShell({
   const [notificationsLoading, setNotificationsLoading] =
     useState(false);
 
+  const [notificationsLoaded, setNotificationsLoaded] =
+    useState(false);
+
   const { t, language } = useLanguage();
 
   const theme = useSyncExternalStore(
@@ -180,21 +183,14 @@ export default function WorkspaceShell({
     try {
       setNotificationsLoading(true);
 
-      const [notificationData, countData] =
-        await Promise.all([
-          apiFetch<NotificationData[]>(
-            "/notifications/",
-            { signal },
-          ),
-
-          apiFetch<{ unread_count: number }>(
-            "/notifications/unread-count",
-            { signal },
-          ),
-        ]);
+      const notificationData =
+        await apiFetch<NotificationData[]>(
+          "/notifications/",
+          { signal },
+        );
 
       setNotifications(notificationData);
-      setUnreadCount(countData.unread_count);
+      setNotificationsLoaded(true);
     } catch (error) {
       if (isAbortError(error)) return;
     } finally {
@@ -205,7 +201,16 @@ export default function WorkspaceShell({
   useEffect(() => {
     if (!isAuthenticated) return;
     const controller = new AbortController();
-    queueMicrotask(() => loadNotifications(controller.signal));
+    queueMicrotask(() => {
+      apiFetch<{ unread_count: number }>(
+        "/notifications/unread-count",
+        { signal: controller.signal },
+      )
+        .then((data) => setUnreadCount(data.unread_count))
+        .catch((cause) => {
+          if (isAbortError(cause)) return;
+        });
+    });
     return () => controller.abort();
   }, [isAuthenticated]);
 
@@ -514,7 +519,11 @@ export default function WorkspaceShell({
                     nextValue,
                   );
 
-                  if (nextValue) {
+                  if (
+                    nextValue &&
+                    !notificationsLoaded &&
+                    !notificationsLoading
+                  ) {
                     loadNotifications();
                   }
                 }}
