@@ -765,269 +765,208 @@ def generate_quiz(
     question_count: int = 10
 ):
     quiz_source = _prepare_quiz_source(text)
-    questions: list[QuizQuestion] = []
-    max_attempts = 3
-    max_context_chars = 15000
-    quiz_json_schema = OllamaQuizQuestion.model_json_schema()
     quiz_started_at = time.perf_counter()
-    used_context_starts: list[int] = []
 
-    for question_number in range(1, question_count + 1):
-        previous_questions = "\n".join(
-            f"- {question.question_text[:200]}" for question in questions
-        ) or "Henüz önceki soru yok."
+    max_context_chars = 18000
 
-        if len(quiz_source) <= max_context_chars or question_count == 1:
-            context_start = 0
-            context = quiz_source[:max_context_chars]
-        else:
-            available_offset = len(quiz_source) - max_context_chars
-            context_start = round(
-                available_offset * (question_number - 1) / (question_count - 1)
-            )
-            context = quiz_source[
-                context_start:context_start + max_context_chars
-            ]
+    if len(quiz_source) <= max_context_chars:
+        context = quiz_source
+    else:
+        chunk_size = max_context_chars // 3
 
-        used_context_starts.append(context_start)
+        start_chunk = quiz_source[:chunk_size]
 
-        prompt = f"""
-Verilen ders notundan toplam {question_count} soruluk quiz'in
-{question_number}. sorusunu üret.
+        middle_start = max(
+            0,
+            (len(quiz_source) // 2) - (chunk_size // 2)
+        )
+        middle_chunk = quiz_source[
+            middle_start:middle_start + chunk_size
+        ]
+
+        end_chunk = quiz_source[-chunk_size:]
+
+        context = (
+            start_chunk
+            + "\n\n--- KAYNAĞIN ORTA BÖLÜMÜ ---\n\n"
+            + middle_chunk
+            + "\n\n--- KAYNAĞIN SON BÖLÜMÜ ---\n\n"
+            + end_chunk
+        )
+
+    question_schema = OllamaQuizQuestion.model_json_schema()
+
+    batch_schema = {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "minItems": question_count,
+                "maxItems": question_count,
+                "items": question_schema,
+            }
+        },
+        "required": ["questions"],
+        "additionalProperties": False,
+    }
+
+    prompt = f"""
+Aşağıdaki ders notuna dayanarak TAM OLARAK {question_count} adet
+çoktan seçmeli sınav sorusu oluştur.
 
 KURALLAR:
 
-- Önce context içinden açık ve güvenilir TEK bir bilgiyi source_fact alanına yaz.
-- source_fact en fazla 1-2 kısa cümle olsun ve kaynakta olmayan bilgi içermesin.
-- question_text, options ve correct_answer alanlarını yalnızca source_fact üzerinden oluştur.
-- Doğru cevabı source_fact üzerinden doğrudan kanıtlayamıyorsan bu soruyu üretme; daha basit bir bilgi seç.
-- Doğru cevap context içinde açıkça desteklenmiyorsa daha basit bir kavram seç.
-- Hesaplama sonucu contextten güvenilir biçimde çıkarılamıyorsa kullanma.
-- Tek bağımsız ve tek başına anlaşılabilir soru üret; alt sorular yazma.
-- question_text düzgün ve tam bir Türkçe soru olsun; "?" veya "." ile bitebilir.
-- Soru kökünde neyin sorulduğu açık olsun; eksik veya belirsiz ifade kullanma.
-- a), b) alt soruları veya birden fazla görev kullanma.
-- Grafik çizme, açıklama yazma ya da benzeri açık uçlu görevler isteme.
-- Doğru/yanlış sorusunu 5 şıklı multiple-choice gibi gösterme.
-- question_text içine A)-E) seçenekleri ekleme.
-- options aynı türde, anlamlı 5 farklı seçenek içersin ve yalnızca biri doğru olsun.
-- Seçenekler aynı kavramın eş anlamlıları olmasın; Kesikli/Diskret gibi tekrarlar kullanma.
-- Bir sorunun birden fazla makul doğru cevabı varsa o soruyu kullanma.
-- "Hangi değerleri alır?" veya "hangi aralıkta?" sorularında tekil rastgele sayıları seçenek yapma.
-- Doğru, Yanlış, Bilinmiyor, Belirsiz, Başka bir veya Hiçbiri gibi dolgu setleri kullanma.
-- options metinlerinin başına A), B), C), D), E) ekleme.
+- TAM OLARAK {question_count} soru üret.
+- Bütün sorular Türkçe olsun.
+- Bütün seçenekler Türkçe olsun.
+- Her soru farklı bir kavramı ölçsün.
+- Aynı veya çok benzer soruları tekrar etme.
+- Her soru için source_fact alanına kaynak metinden 1-2 kısa cümle yaz.
+- Soruyu ve doğru cevabı yalnızca source_fact üzerinden oluştur.
+- Kaynakta bulunmayan bilgi uydurma.
+- Soru tek başına anlaşılabilir olsun.
+- Alt soru oluşturma.
+- Açık uçlu soru oluşturma.
+- Her soruda tam olarak 5 seçenek olsun.
+- Yalnızca bir seçenek doğru olsun.
+- Seçenekler anlamlı ve birbirinden farklı olsun.
+- Seçeneklerin başına A), B), C), D), E) yazma.
 - correct_answer yalnızca A, B, C, D veya E olsun.
-- Yalnızca kaynak metne dayan, bilgi uydurma ve kaynak dilini koru.
-- Bozuk OCR parçasını veya örnek soruyu kopyalama; kavramı temiz bir soruya dönüştür.
-- question_text içine uzun bilgi, sonuç veya "olasılığı =" listeleri koyma.
-- Önceki sorulardan farklı bir kavram seç.
-- Yalnızca eksiksiz JSON döndür; başka metin yazma.
+- Uzun ve gereksiz açıklamalar üretme.
+- Kaynağın farklı bölümlerinden soru seç.
+- Aynı başlık veya aynı kavramdan birden fazla soru üretme.
+- Soruları mümkün olduğunca farklı alt konulara dağıt.
+- Eğer kaynakta yeterli çeşitlilik varsa aynı kavram ailesini tekrar etme.
+- Yalnızca geçerli JSON döndür.
+- JSON dışında hiçbir şey yazma.
 
-DAHA ÖNCE OLUŞTURULAN SORULAR:
+ÇIKTI YAPISI:
 
-{previous_questions}
+{{
+  "questions": [
+    {{
+      "source_fact": "...",
+      "question_text": "...",
+      "options": [
+        "...",
+        "...",
+        "...",
+        "...",
+        "..."
+      ],
+      "correct_answer": "A"
+    }}
+  ]
+}}
 
 DERS NOTU:
 
 {context}
-
-Yalnızca aşağıdaki yapıda geçerli JSON döndür:
-
-{{
-  "source_fact": "...",
-  "question_text": "...",
-  "options": ["...", "...", "...", "...", "..."],
-  "correct_answer": "A"
-}}
 """
 
-        generated_question = None
-        question_started_at = time.perf_counter()
-        retry_instruction = ""
+    max_attempts = 2
+    last_error = None
 
-        for attempt in range(1, max_attempts + 1):
-            attempt_started_at = time.perf_counter()
-            attempt_prompt = prompt
+    for attempt in range(1, max_attempts + 1):
+        attempt_started_at = time.perf_counter()
 
-            if retry_instruction:
-                attempt_prompt = f"{prompt}\n\n{retry_instruction}"
-
-            try:
-                raw_response = _generate_with_ollama(
-                    attempt_prompt,
-                    json_schema=quiz_json_schema,
-                    num_predict=400,
-                )
-                generated = OllamaQuizQuestion.model_validate(
-                    json.loads(raw_response)
-                )
-                _validate_ollama_source_fact(generated)
-                generated_question = _to_quiz_question(generated)
-                _validate_quiz(
-                    QuizResponse(questions=[generated_question]),
-                    1,
-                    previous_question_texts=[
-                        question.question_text for question in questions
-                    ],
-                )
-                break
-            except (json.JSONDecodeError, ValueError) as error:
-                generated_question = None
-                attempt_duration = time.perf_counter() - attempt_started_at
-                retry_instruction = _quiz_retry_instruction(error)
-                print(
-                    f"Ollama {question_number}. soru doğrulama hatası "
-                    f"(deneme {attempt}/{max_attempts}, "
-                    f"{attempt_duration:.1f} sn): {error}"
-                )
-
-        if generated_question is None:
-            fallback_context = _select_fallback_context(context)
-            fallback_prompt = f"""
-Bu metinden yalnızca temel bir kavram seç.
-Kısa ve bağımsız tek bir çoktan seçmeli soru oluştur.
-- source_fact alanına kaynaktan 1-2 kısa cümlelik doğrudan bilgiyi yaz.
-- Soruyu ve doğru cevabı yalnızca source_fact üzerinden oluştur.
-- Doğru cevabı source_fact ile kanıtlayamıyorsan daha basit bilgi seç.
-- Bir hesaplama örneğini kopyalama.
-- Kaynak metinden basit bir TANIM veya TEMEL KAVRAM seç.
-- Doğru cevabı yalnızca kaynak metindeki açık ve doğrudan bilgiye dayandır.
-- Emin değilsen daha basit başka bir kavram seç.
-- Hesaplama gerektirmeyen veya basit hesaplamalı bir soru tercih et.
-- Alt soru ve a), b), c) kullanma.
-- Grafik çizme, açıklama yazma veya birden fazla işlem isteme.
-- Doğru/yanlış mantığında soru veya dolgu seçenekleri üretme.
-- Aynı türde, anlamlı 5 kısa ve birbirinden farklı seçenek üret.
-- Eş anlamlı seçenekler kullanma; yalnızca bir seçenek makul biçimde doğru olsun.
-- Genel bir aralık sorusuna tekil rastgele sayı seçenekleri verme.
-- question_text içine uzun bilgi veya sonuç listesi koyma.
-- options içine A), B), C), D), E) yazma.
-- correct_answer yalnızca A, B, C, D veya E olsun.
-- JSON dışında hiçbir şey döndürme.
-
-ÖNCEKİ SORULAR:
-{previous_questions}
-
-KAYNAK METİN:
-{fallback_context}
-"""
-            print(f"Ollama soru {question_number} fallback üretimi başladı")
-            fallback_started_at = time.perf_counter()
-
-            try:
-                raw_response = _generate_with_ollama(
-                    fallback_prompt,
-                    json_schema=quiz_json_schema,
-                    num_predict=400,
-                )
-                generated = OllamaQuizQuestion.model_validate(
-                    json.loads(raw_response)
-                )
-                _validate_ollama_source_fact(generated)
-                generated_question = _to_quiz_question(generated)
-                _validate_quiz(
-                    QuizResponse(questions=[generated_question]),
-                    1,
-                    previous_question_texts=[
-                        question.question_text for question in questions
-                    ],
-                )
-            except (json.JSONDecodeError, ValueError) as error:
-                generated_question = None
-                print(
-                    f"Ollama soru {question_number} fallback doğrulama "
-                    f"hatası: {error}"
-                )
-            finally:
-                fallback_duration = time.perf_counter() - fallback_started_at
-                print(
-                    f"Ollama soru {question_number} fallback üretim süresi: "
-                    f"{fallback_duration:.1f} sn"
-                )
-
-        if generated_question is None:
-            alternate_context = _select_alternate_context(
-                quiz_source,
-                used_context_starts,
+        try:
+            num_predict = min(
+                5000,
+                max(900, question_count * 260)
             )
-            alternate_prompt = f"""
-Farklı kaynak bölümünden yalnızca açıkça desteklenen tek bir kavram seç.
-- source_fact alanına kaynaktan 1-2 kısa cümlelik doğrudan bilgiyi yaz.
-- Soruyu ve doğru cevabı yalnızca source_fact üzerinden oluştur.
-- Doğru cevabı source_fact ile kanıtlayamıyorsan daha basit bilgi seç.
-- Yalnızca 1 bağımsız multiple-choice soru üret.
-- 5 anlamlı ve farklı seçenek üret; yalnızca biri doğru olsun.
-- Doğru/yanlış formatı, alt soru veya açık uçlu görev kullanma.
-- Belirsiz soru kökü kullanma.
-- Önceki sorulara benzemeyen basit bir kavram seç.
-- Emin değilsen daha basit başka bir kavram seç.
-- options içine A), B), C), D), E) yazma.
-- correct_answer yalnızca A, B, C, D veya E olsun.
-- JSON dışında hiçbir şey döndürme.
 
-ÖNCEKİ SORULAR:
-{previous_questions}
+            raw_response = _generate_with_ollama(
+                prompt,
+                json_schema=batch_schema,
+                num_predict=num_predict,
+            )
 
-FARKLI KAYNAK BÖLÜMÜ:
-{alternate_context}
-"""
+            parsed = json.loads(raw_response)
+
+            raw_questions = parsed.get("questions")
+
+            if not isinstance(raw_questions, list):
+                raise ValueError(
+                    "Ollama yanıtında questions listesi bulunamadı."
+                )
+
+            if len(raw_questions) != question_count:
+                raise ValueError(
+                    f"{question_count} soru bekleniyordu, "
+                    f"{len(raw_questions)} soru üretildi."
+                )
+
+            questions: list[QuizQuestion] = []
+
+            for raw_question in raw_questions:
+                generated = OllamaQuizQuestion.model_validate(
+                    raw_question
+                )
+
+                _validate_ollama_source_fact(generated)
+
+                generated_question = _to_quiz_question(
+                    generated
+                )
+
+                questions.append(generated_question)
+
+            quiz = QuizResponse(questions=questions)
+
+            quiz = _validate_quiz(
+                quiz,
+                question_count
+            )
+
+            attempt_duration = (
+                time.perf_counter() - attempt_started_at
+            )
+
+            total_duration = (
+                time.perf_counter() - quiz_started_at
+            )
+
             print(
-                f"Ollama soru {question_number} "
-                "alternate context retry başladı"
+                f"Ollama Quiz tek çağrıda tamamlandı: "
+                f"{len(quiz.questions)} soru, "
+                f"AI süresi {attempt_duration:.1f} sn, "
+                f"toplam {total_duration:.1f} sn"
             )
-            alternate_started_at = time.perf_counter()
 
-            try:
-                raw_response = _generate_with_ollama(
-                    alternate_prompt,
-                    json_schema=quiz_json_schema,
-                    num_predict=400,
-                )
-                generated = OllamaQuizQuestion.model_validate(
-                    json.loads(raw_response)
-                )
-                _validate_ollama_source_fact(generated)
-                generated_question = _to_quiz_question(generated)
-                _validate_quiz(
-                    QuizResponse(questions=[generated_question]),
-                    1,
-                    previous_question_texts=[
-                        question.question_text for question in questions
-                    ],
-                )
-            except (json.JSONDecodeError, ValueError) as error:
-                generated_question = None
-                print(
-                    f"Ollama soru {question_number} alternate context "
-                    f"retry doğrulama hatası: {error}"
-                )
-                raise OllamaServiceError(
-                    "Yapay zeka geçerli bir yanıt oluşturamadı."
-                ) from error
-            finally:
-                alternate_duration = time.perf_counter() - alternate_started_at
-                print(
-                    f"Ollama soru {question_number} alternate context "
-                    f"retry süresi: {alternate_duration:.1f} sn"
-                )
+            return quiz
 
-        questions.append(generated_question)
-        question_duration = time.perf_counter() - question_started_at
-        print(
-            f"Ollama soru {question_number} üretim süresi: "
-            f"{question_duration:.1f} sn"
-        )
+        except (
+            json.JSONDecodeError,
+            ValueError,
+        ) as error:
+            last_error = error
 
-    quiz = QuizResponse(questions=questions)
-    quiz = _validate_quiz(quiz, question_count)
+            attempt_duration = (
+                time.perf_counter() - attempt_started_at
+            )
 
-    total_duration = time.perf_counter() - quiz_started_at
-    print(
-        f"Ollama Quiz tamamlandı: {len(quiz.questions)} soru, "
-        f"toplam {total_duration:.1f} sn"
-    )
+            print(
+                f"Ollama toplu quiz doğrulama hatası "
+                f"(deneme {attempt}/{max_attempts}, "
+                f"{attempt_duration:.1f} sn): {error}"
+            )
 
-    return quiz
+            prompt += f"""
+
+ÖNCEKİ ÇIKTIN GEÇERSİZDİ.
+
+Hata:
+{error}
+
+Çıktıyı baştan oluştur.
+TAM OLARAK {question_count} soru döndür.
+Yalnızca JSON döndür.
+"""
+
+    raise OllamaServiceError(
+        "Yapay zeka geçerli quiz oluşturamadı."
+    ) from last_error
 
 
 # =========================================================
