@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -138,11 +139,16 @@ def get_quizzes(
 ):
 
     quizzes = (
-        db.query(Quiz)
+        db.query(
+            Quiz,
+            func.count(Question.id).label("question_count")
+        )
         .join(Course, Quiz.course_id == Course.id)
+        .outerjoin(Question, Question.quiz_id == Quiz.id)
         .filter(
             Course.user_id == current_user.id
         )
+        .group_by(Quiz.id)
         .all()
     )
 
@@ -152,9 +158,10 @@ def get_quizzes(
             "title": quiz.title,
             "course_id": quiz.course_id,
             "document_id": quiz.document_id,
-            "created_at": quiz.created_at
+            "created_at": quiz.created_at,
+            "question_count": question_count
         }
-        for quiz in quizzes
+        for quiz, question_count in quizzes
     ]
 
 
