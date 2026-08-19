@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ApiError,
@@ -235,9 +236,25 @@ export default function LoginForm() {
             </button>
           ) : null}
         </form>
-        <p className="auth-hand-note">
-          {verificationMode ? t("verificationHandNote") : mode === "login" ? t("forgotPasswordNote") : t("registerHandNote")}
-        </p>
+        {verificationMode ? (
+  <p className="auth-hand-note">
+    {t("verificationHandNote")}
+  </p>
+) : mode === "login" ? (
+  <p className="auth-hand-note">
+    <button
+      type="button"
+      className="auth-forgot-password"
+      onClick={() => router.push("/forgot-password")}
+    >
+      {t("forgotPasswordNote")}
+    </button>
+  </p>
+) : (
+  <p className="auth-hand-note">
+    {t("registerHandNote")}
+  </p>
+)}
       </div>
     </div>
   );
