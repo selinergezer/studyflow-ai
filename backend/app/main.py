@@ -22,6 +22,7 @@ from app.models.event import Event
 from app.models.study_session import StudySession
 from app.models.notification import Notification
 from app.models.email_verification import EmailVerification
+from app.models.password_reset import PasswordReset
 
 # =========================
 # API ROUTERLARI

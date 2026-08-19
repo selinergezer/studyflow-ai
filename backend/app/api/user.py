@@ -28,7 +28,15 @@ from app.services.email_verification_service import create_verification_code, pw
 
 from app.schemas.email_verification import ResendVerificationRequest
 from app.services.email_verification_service import create_verification_code
-from app.services.email_service import send_verification_email
+from app.services.email_service import (
+    send_verification_email,
+    send_password_reset_email,
+)
+from app.services.password_reset_service import (
+    create_password_reset_token,
+    hash_reset_token,
+)
+from app.models.password_reset import PasswordReset
 
 
 router = APIRouter(
@@ -203,6 +211,102 @@ def resend_verification(
     return {
         "message": "Yeni doğrulama kodu gönderildi.",
         "email": user.email
+    }
+@router.post("/forgot-password")
+def forgot_password(
+    email: str,
+    db: Session = Depends(get_db)
+):
+    user = (
+        db.query(User)
+        .filter(User.email == email)
+        .first()
+    )
+
+    # Güvenlik nedeniyle kullanıcı bulunamadığında
+    # farklı bir cevap vermiyoruz.
+    if user is None:
+        return {
+            "message": "Eğer bu email kayıtlıysa şifre sıfırlama bağlantısı gönderildi."
+        }
+
+    token, reset = create_password_reset_token(
+        db,
+        user.id
+    )
+
+    db.commit()
+
+    # Şimdilik linki oluşturuyoruz.
+    # Bir sonraki adımda bunu gerçek e-posta olarak göndereceğiz.
+    reset_link = (
+        f"http://localhost:3000/reset-password?token={token}"
+    )
+
+    send_password_reset_email(
+    user.email,
+    reset_link
+    )
+
+    return {
+        "message": "Eğer bu email kayıtlıysa şifre sıfırlama bağlantısı gönderildi."
+    }
+
+@router.post("/reset-password")
+def reset_password(
+    token: str,
+    new_password: str,
+    db: Session = Depends(get_db)
+):
+    token_hash = hash_reset_token(token)
+
+    reset = (
+        db.query(PasswordReset)
+        .filter(
+            PasswordReset.token_hash == token_hash,
+            PasswordReset.used == False
+        )
+        .order_by(
+            PasswordReset.created_at.desc()
+        )
+        .first()
+    )
+
+    if reset is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Geçersiz veya kullanılmış şifre sıfırlama bağlantısı."
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if reset.expires_at < now:
+        raise HTTPException(
+            status_code=400,
+            detail="Şifre sıfırlama bağlantısının süresi dolmuş."
+        )
+
+    user = (
+        db.query(User)
+        .filter(User.id == reset.user_id)
+        .first()
+    )
+
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Kullanıcı bulunamadı."
+        )
+
+    user.password = hash_password(new_password)
+
+    # Token'ı tek kullanımlık yap
+    reset.used = True
+
+    db.commit()
+
+    return {
+        "message": "Şifreniz başarıyla sıfırlandı."
     }
 
 @router.post("/login")
