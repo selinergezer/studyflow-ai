@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -164,6 +164,36 @@ def get_quizzes(
         for quiz, question_count in quizzes
     ]
 
+# =========================================================
+# QUIZ SİL
+# =========================================================
+
+@router.delete("/{quiz_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_quiz(
+    quiz_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    quiz = (
+        db.query(Quiz)
+        .join(Course, Quiz.course_id == Course.id)
+        .filter(
+            Quiz.id == quiz_id,
+            Course.user_id == current_user.id
+        )
+        .first()
+    )
+
+    if quiz is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Quiz bulunamadı."
+        )
+
+    db.delete(quiz)
+    db.commit()
+
+    return None
 
 # =========================================================
 # TEK BİR QUIZ GETİR

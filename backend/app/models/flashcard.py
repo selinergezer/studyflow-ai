@@ -36,6 +36,12 @@ class Flashcard(Base):
         nullable=True
     )
 
+    batch_id = Column(
+    String(36),
+    nullable=True,
+    index=True
+    )
+
     created_at = Column(
         DateTime(timezone=True),
         server_default=func.now()
