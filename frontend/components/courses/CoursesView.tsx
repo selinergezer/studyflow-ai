@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiErrorMessage, apiFetch, isAbortError, type Course, type DocumentData } from "@/lib/api";
+import { apiErrorMessage, apiFetch, isAbortError, type Course, type DocumentData, deleteCourseApi } from "@/lib/api";
 import { useLanguage } from "@/providers/LanguageProvider";
 
 export default function CoursesView() {
@@ -61,14 +61,44 @@ export default function CoursesView() {
     }
   }
 
-  function deleteCourse(event: React.MouseEvent, courseId: number) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (!window.confirm("Bu kursu silmek istediğinize emin misiniz?")) return;
-    setDeletingId(courseId);
-    setError("Kurs silme işlemi backend tarafından henüz desteklenmiyor.");
+  async function deleteCourse(
+  event: React.MouseEvent,
+  courseId: number,
+) {
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (
+    !window.confirm(
+      "Bu kursu silmek istediğinize emin misiniz?",
+    )
+  ) {
+    return;
+  }
+
+  setDeletingId(courseId);
+  setError(null);
+
+  try {
+    await deleteCourseApi(courseId);
+
+    setCourses((currentCourses) =>
+      currentCourses.filter(
+        (course) => course.id !== courseId,
+      ),
+    );
+  } catch (cause) {
+    setError(
+      apiErrorMessage(
+        cause,
+        "Kurs silinemedi.",
+        "Kurs silinirken sunucuya ulaşılamadı.",
+      ),
+    );
+  } finally {
     setDeletingId(null);
   }
+}
 
   return <div className="courses-page">
     <header className="courses-heading">

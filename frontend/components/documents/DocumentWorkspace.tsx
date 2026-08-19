@@ -7,6 +7,7 @@ import QuizPanel from "@/components/documents/QuizPanel";
 import FlashcardStudy from "@/components/documents/FlashcardStudy";
 import {
   apiFetch,
+  deleteQuizApi,
   isAbortError,
   type DocumentData,
   type Flashcard,
@@ -35,6 +36,20 @@ export default function DocumentWorkspace({
   const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
   const [activeFlashcards, setActiveFlashcards] =
     useState<Flashcard[] | null>(null);
+
+    const flashcardBatches = Array.from(
+  flashcards.reduce((groups, card) => {
+    const key = card.batch_id ?? `legacy-${card.id}`;
+
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+
+    groups.get(key)!.push(card);
+
+    return groups;
+  }, new Map<string, Flashcard[]>())
+);
 
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
   const [selectedQuiz, setSelectedQuiz] = useState<Quiz | null>(null);
@@ -211,9 +226,63 @@ export default function DocumentWorkspace({
     setSelectedQuiz(normalized);
   }
 
-  function requestQuizDelete(
+  async function requestQuizDelete(
+  event: React.MouseEvent,
+  quiz: Quiz
+) {
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (
+    !window.confirm(
+      language === "tr"
+        ? "Bu sınavı silmek istediğinize emin misiniz?"
+        : "Are you sure you want to delete this quiz?"
+    )
+  ) {
+    return;
+  }
+
+  const quizId = quiz.id ?? quiz.quiz_id;
+
+  if (quizId == null) {
+    setError(
+      language === "tr"
+        ? "Sınav ID'si bulunamadı."
+        : "Quiz ID was not found."
+    );
+    return;
+  }
+
+  setError(null);
+
+  try {
+    await deleteQuizApi(quizId);
+
+    setQuizzes((current) =>
+      current.filter(
+        (currentQuiz) =>
+          (currentQuiz.id ?? currentQuiz.quiz_id) !== quizId
+      )
+    );
+
+    if (
+      (selectedQuiz?.id ?? selectedQuiz?.quiz_id) === quizId
+    ) {
+      setSelectedQuiz(null);
+    }
+  } catch (cause) {
+    setError(
+      language === "tr"
+        ? "Sınav silinemedi."
+        : "Quiz could not be deleted."
+    );
+  }
+}
+
+  async function deleteFlashcardBatch(
     event: React.MouseEvent,
-    _quiz: Quiz
+    batchCards: Flashcard[]
   ) {
     event.preventDefault();
     event.stopPropagation();
@@ -221,18 +290,50 @@ export default function DocumentWorkspace({
     if (
       !window.confirm(
         language === "tr"
-          ? "Bu sınavı silmek istediğinize emin misiniz?"
-          : "Are you sure you want to delete this quiz?"
+          ? `Bu kart setindeki ${batchCards.length} kartın tamamını silmek istediğinize emin misiniz?`
+          : `Are you sure you want to delete all ${batchCards.length} cards in this set?`
       )
     ) {
       return;
     }
 
-    setError(
-      language === "tr"
-        ? "Sınav silme işlemi backend tarafından henüz desteklenmiyor."
-        : "Quiz deletion is not supported by the backend yet."
-    );
+    setError(null);
+
+    try {
+      await Promise.all(
+        batchCards.map((card) =>
+          apiFetch<void>(`/flashcards/${card.id}`, {
+            method: "DELETE",
+          })
+        )
+      );
+
+      const deletedIds = new Set(
+        batchCards.map((card) => card.id)
+      );
+
+      setFlashcards((current) =>
+        current.filter(
+          (card) => !deletedIds.has(card.id)
+        )
+      );
+
+      if (
+        activeFlashcards?.some((card) =>
+          deletedIds.has(card.id)
+        )
+      ) {
+        setActiveFlashcards(null);
+      }
+    } catch (cause) {
+      if (!isAbortError(cause)) {
+        setError(
+          language === "tr"
+            ? "Kart seti silinemedi."
+            : "Card set could not be deleted."
+        );
+      }
+    }
   }
 
   async function generateFlashcards() {
@@ -747,62 +848,121 @@ export default function DocumentWorkspace({
                       ? "ÖNCEKİ KARTLAR"
                       : "PREVIOUS CARDS"}
                   </p>
+{flashcardBatches.length ? (
+  <div
+    className="flashcard-history-list"
+    style={{
+      maxHeight: "520px",
+      overflowY: "auto",
+      paddingRight: "10px",
+    }}
+  >
+    {flashcardBatches.map(
+      ([batchId, batchCards], index) => (
+        <article
+          key={batchId}
+          className="flashcard-history-card"
+          style={{ position: "relative" }}
+        >
+          <span
+            className="flashcard-history-tape"
+            aria-hidden="true"
+          />
 
-                  {flashcards.length ? (
-                    <article className="flashcard-history-card">
-                      <span
-                        className="flashcard-history-tape"
-                        aria-hidden="true"
-                      />
+          <h3>
+            {language === "tr"
+              ? `Kart Seti ${index + 1}`
+              : `Card Set ${index + 1}`}
+          </h3>
 
-                      <h3>
-                        {language ===
-                        "tr"
-                          ? "Bu PDF'nin Kartları"
-                          : "Cards for This PDF"}
-                      </h3>
+          <p>
+            {batchCards.length}{" "}
+            {language === "tr"
+              ? "kart"
+              : "cards"}
+          </p>
 
-                      <p>
-                        {
-                          flashcards.length
-                        }{" "}
-                        {language ===
-                        "tr"
-                          ? "kart"
-                          : "cards"}
-                      </p>
+          <div className="flashcard-history-actions">
+            <button
+              type="button"
+              onClick={() =>
+                setActiveFlashcards(batchCards)
+              }
+            >
+              {language === "tr"
+                ? "Tekrar Çalış →"
+                : "Study Again →"}
+            </button>
 
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setActiveFlashcards(
-                            flashcards
-                          )
-                        }
-                      >
-                        {language ===
-                        "tr"
-                          ? "Tekrar Çalış →"
-                          : "Study Again →"}
-                      </button>
-                    </article>
-                  ) : (
-                    <div className="quiz-history-empty">
-                      <strong>
-                        {language ===
-                        "tr"
-                          ? "Bu PDF için henüz bilgi kartın yok."
-                          : "You don't have flashcards for this PDF yet."}
-                      </strong>
+            <button
+              type="button"
+              className="flashcard-history-delete-btn"
+              style={{
+                position: "absolute",
+                top: "16px",
+                right: "16px",
+                width: "28px",
+                height: "28px",
+                padding: 0,
+                margin: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                border: "none",
+                background: "transparent",
+                color: "#e76f61",
+                cursor: "pointer",
+                borderRadius: "6px",
+              }}
+              onClick={(event) =>
+                deleteFlashcardBatch(
+                  event,
+                  batchCards
+                )
+              }
+              aria-label={
+                language === "tr"
+                  ? "Kart setini sil"
+                  : "Delete card set"
+              }
+              title={
+                language === "tr"
+                  ? "Kart setini sil"
+                  : "Delete card set"
+              }
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                width="18"
+                height="18"
+              >
+                <path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" />
+              </svg>
+            </button>
+          </div>
+        </article>
+      )
+    )}
+  </div>
+) : (
+  <div className="quiz-history-empty">
+    <strong>
+      {language === "tr"
+        ? "Bu PDF için henüz bilgi kartın yok."
+        : "You don't have flashcards for this PDF yet."}
+    </strong>
 
-                      <span>
-                        {language ===
-                        "tr"
-                          ? "Soldaki ayarlardan ilk kartlarını oluştur."
-                          : "Create your first cards using the settings on the left."}
-                      </span>
-                    </div>
-                  )}
+    <span>
+      {language === "tr"
+        ? "Soldaki ayarlardan ilk kartlarını oluştur."
+        : "Create your first cards using the settings on the left."}
+    </span>
+  </div>
+  )}
+                  
                 </aside>
               </div>
             )}

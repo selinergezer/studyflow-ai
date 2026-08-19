@@ -43,8 +43,8 @@ export default function ApiCollectionView({
     useState<number | null>(null);
 
   const [loading, setLoading] = useState(true);
-  const [deletingQuizId, setDeletingQuizId] = useState<number | null>(null);
   const [deletingDocumentId, setDeletingDocumentId] = useState<number | null>(null);
+  const [deletingQuizId, setDeletingQuizId] = useState<number | null>(null);
   const [showCreateQuiz, setShowCreateQuiz] = useState(false);
   const [questionCount, setQuestionCount] = useState(10);
   const [difficulty, setDifficulty] = useState<Difficulty>("medium");
@@ -185,12 +185,105 @@ export default function ApiCollectionView({
     }
   }
 
-  function deleteQuiz(event: React.MouseEvent, quizId: number) {
+  async function deleteDocument(
+  event: React.MouseEvent,
+  documentId: number,
+) {
+  event.preventDefault();
+  event.stopPropagation();
+
+  const confirmed = window.confirm(
+    language === "tr"
+      ? "Bu PDF'yi ve bu PDF'ye ait sınavları silmek istediğinize emin misiniz?"
+      : "Are you sure you want to delete this PDF and its quizzes?",
+  );
+
+  if (!confirmed) return;
+
+  setDeletingDocumentId(documentId);
+  setError(null);
+
+  try {
+    await apiFetch(`/documents/${documentId}`, {
+      method: "DELETE",
+    });
+
+    // PDF'yi ekrandan kaldır
+    setDocuments((current) =>
+      current.filter(
+        (document) =>
+          (document.id ?? document.document_id) !== documentId,
+      ),
+    );
+
+    // PDF'ye ait sınavları da ekrandan kaldır
+    setQuizzes((current) =>
+      current.filter(
+        (quiz) => quiz.document_id !== documentId,
+      ),
+    );
+
+    // Flashcard sayfasında da aynı component kullanılıyorsa
+    setFlashcards((current) =>
+      current.filter(
+        (flashcard) => flashcard.document_id !== documentId,
+      ),
+    );
+  } catch (cause) {
+    setError(
+      apiErrorMessage(
+        cause,
+        language === "tr"
+          ? "PDF silinirken bir hata oluştu."
+          : "An error occurred while deleting the PDF.",
+      ),
+    );
+  } finally {
+    setDeletingDocumentId(null);
+  }
+}
+
+  async function deleteQuiz(
+    event: React.MouseEvent,
+    quizId: number,
+  ) {
+    event.preventDefault();
     event.stopPropagation();
-    if (!window.confirm("Bu sınavı silmek istediğinize emin misiniz?")) return;
+
+    const confirmed = window.confirm(
+      language === "tr"
+        ? "Bu sınavı silmek istediğinize emin misiniz?"
+        : "Are you sure you want to delete this quiz?",
+    );
+
+    if (!confirmed) return;
+
     setDeletingQuizId(quizId);
-    setError("Sınav silme işlemi backend tarafından henüz desteklenmiyor.");
-    setDeletingQuizId(null);
+    setError(null);
+
+    try {
+      await apiFetch(`/quizzes/${quizId}`, {
+        method: "DELETE",
+      });
+
+      setQuizzes((current) =>
+        current.filter(
+          (quiz) =>
+            (quiz.id ?? quiz.quiz_id) !== quizId,
+        ),
+      );
+    } catch (cause) {
+      setError(
+        apiErrorMessage(
+          cause,
+          language === "tr"
+            ? "Sınav silinemedi."
+            : "The quiz could not be deleted.",
+        ),
+      );
+    } finally {
+      setDeletingQuizId(null);
+    }
   }
 
   async function deleteFlashcardSet(event: React.MouseEvent, documentId: number) {
@@ -237,6 +330,35 @@ export default function ApiCollectionView({
       {error ? <p className="quizzes-error" role="alert">{error}</p> : null}
       {quizDocuments.length ? <div className="quizzes-grid">{quizDocuments.map((document) => <article key={document.id} className="quizzes-document-card" role="link" tabIndex={0} onClick={() => router.push(`/documents/${document.id}?tab=quiz`)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") router.push(`/documents/${document.id}?tab=quiz`); }}>
         <span className="quizzes-card-flag" aria-hidden="true" />
+        <button
+  type="button"
+  disabled={deletingDocumentId === document.id}
+  onClick={(event) =>
+    deleteDocument(event, document.id)
+  }
+  className="flashcards-delete quizzes-delete"
+  aria-label={
+    language === "tr"
+      ? `${document.filename} dosyasını sil`
+      : `Delete ${document.filename}`
+  }
+  title={language === "tr" ? "Sil" : "Delete"}
+>
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M4 7h16" />
+    <path d="M9 7V4h6v3" />
+    <path d="m18 7-1 13H7L6 7" />
+    <path d="M10 11v5" />
+    <path d="M14 11v5" />
+  </svg>
+</button>
         <span className="quizzes-card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
         <h2>{document.filename}</h2>
         <span className="quizzes-card-rule" aria-hidden="true" />

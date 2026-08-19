@@ -345,7 +345,11 @@ export async function apiFetch<T>(
    */
   getRequestCache.clear();
 
-  return response.json() as Promise<T>;
+if (response.status === 204) {
+  return undefined as T;
+}
+
+return response.json() as Promise<T>;
 }
 
 export type Course = {
@@ -401,5 +405,22 @@ export type Flashcard = {
   answer: string;
   course_id: number;
   document_id: number | null;
+  batch_id: string | null;
   created_at?: string;
 };
+
+export async function deleteCourseApi(
+  courseId: number,
+): Promise<void> {
+  await apiFetch<void>(`/courses/${courseId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function deleteQuizApi(
+  quizId: number,
+): Promise<void> {
+  await apiFetch<void>(`/quizzes/${quizId}`, {
+    method: "DELETE",
+  });
+}

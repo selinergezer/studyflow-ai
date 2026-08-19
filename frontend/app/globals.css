@@ -2143,3 +2143,14 @@ html[data-theme="dark"] .library-document-card:hover {
     width: 100%;
   }
 }
+
+.quizzes-document-card {
+  position: relative;
+}
+
+.quizzes-delete {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 5;
+}
