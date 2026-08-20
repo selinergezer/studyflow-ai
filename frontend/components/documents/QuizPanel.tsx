@@ -17,27 +17,35 @@ export default function QuizPanel({ documentId, initialQuiz, initialResult, onQu
   const tr = language === "tr";
   const [questionCount, setQuestionCount] = useState(10);
   const [quiz, setQuiz] = useState<Quiz | null>(initialQuiz ?? null);
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [questions, setQuestions] = useState<QuizQuestion[]>(
+    initialQuiz?.questions ?? []
+  );
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [result, setResult] = useState<QuizResult | null>(initialResult ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const currentQuestion = questions[currentQuestionIndex];
 
-  const questions = quiz?.questions ?? [];
-  const currentQuestion = questions[currentIndex];
 
   useEffect(() => {
-    setQuiz(initialQuiz ?? null);
-    setCurrentIndex(0);
-    setAnswers({});
-    setResult(initialResult ?? null);
-    setWarning(null);
-    setError(null);
-  }, [initialQuiz, initialResult]);
+  setQuiz(initialQuiz ?? null);
+  setQuestions(initialQuiz?.questions ?? []);
+  setCurrentQuestionIndex(0);
+  setAnswers({});
+  setResult(initialResult ?? null);
+  setWarning(null);
+  setError(null);
+}, [initialQuiz, initialResult]);
 
   async function generateQuiz() {
-    setBusy(true); setError(null); setWarning(null); setResult(null); setAnswers({}); setCurrentIndex(0);
+    setBusy(true);
+setError(null);
+setWarning(null);
+setResult(null);
+setAnswers({});
+setCurrentQuestionIndex(0);
     try {
   const created = await apiFetch<Quiz>(
     `/quizzes/generate?document_id=${documentId}&question_count=${questionCount}`,
@@ -45,7 +53,9 @@ export default function QuizPanel({ documentId, initialQuiz, initialResult, onQu
   );
 
   setQuiz(created);
-  onQuizCreated?.(created);
+setQuestions(created.questions ?? []);
+setCurrentQuestionIndex(0);
+onQuizCreated?.(created);
 }
     catch { setError(tr ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Data is currently unavailable. Please try again later."); }
     finally { setBusy(false); }
@@ -57,7 +67,7 @@ export default function QuizPanel({ documentId, initialQuiz, initialResult, onQu
     if (firstUnansweredIndex >= 0) {
       const unansweredCount = quiz.questions.filter((question) => !answers[question.id]).length;
       setWarning(tr ? `${unansweredCount} soruyu henüz cevaplamadınız.` : `${unansweredCount} questions are unanswered.`);
-      setCurrentIndex(firstUnansweredIndex);
+      setCurrentQuestionIndex(firstUnansweredIndex);
       return;
     }
     setBusy(true); setWarning(null); setError(null);
@@ -66,8 +76,21 @@ export default function QuizPanel({ documentId, initialQuiz, initialResult, onQu
     finally { setBusy(false); }
   }
 
-  function restart() { setAnswers({}); setResult(null); setWarning(null); setCurrentIndex(0); }
-  function createAnother() { setQuiz(null); setAnswers({}); setResult(null); setWarning(null); setCurrentIndex(0); }
+  function restart() {
+  setAnswers({});
+  setResult(null);
+  setWarning(null);
+  setCurrentQuestionIndex(0);
+}
+
+function createAnother() {
+  setQuiz(null);
+  setQuestions([]);
+  setAnswers({});
+  setResult(null);
+  setWarning(null);
+  setCurrentQuestionIndex(0);
+}
 
   if (!quiz || !currentQuestion) {
     return <section className="document-quiz-panel is-setup">
@@ -100,14 +123,65 @@ export default function QuizPanel({ documentId, initialQuiz, initialResult, onQu
 
   return <section className="document-quiz-panel has-quiz">
     {result ? <div className="quiz-result-summary"><div><p className="notebook-label">{tr ? "SINAV SONUCU" : "QUIZ RESULT"}</p><h2>{result.correct} / {result.total_questions} <span>{tr ? "doğru" : "correct"}</span></h2></div><strong>%{result.score}</strong><div className="quiz-result-counts"><span>✓ {result.correct} {tr ? "Doğru" : "Correct"}</span><span>✕ {result.wrong} {tr ? "Yanlış" : "Wrong"}</span></div></div> : null}
-    <div className="quiz-question-header"><span className="notebook-label">{result ? (tr ? "SORU İNCELEME" : "QUESTION REVIEW") : (tr ? "SINAV" : "QUIZ")}</span><span>{currentIndex + 1} / {questions.length}</span></div>
-    <h2 className="quiz-question-title">{currentIndex + 1}. {currentQuestion.question_text}</h2>
+    <div className="quiz-question-header"><span className="notebook-label">{result ? (tr ? "SORU İNCELEME" : "QUESTION REVIEW") : (tr ? "SINAV" : "QUIZ")}</span><span>{currentQuestionIndex + 1} / {questions.length}</span></div>
+    <h2 className="quiz-question-title">{currentQuestionIndex + 1}. {currentQuestion.question_text}</h2>
     {currentResult ? <p className={`quiz-answer-state ${currentResult.is_correct ? "correct" : "wrong"}`}>{currentResult.is_correct ? (tr ? "✓ Doğru" : "✓ Correct") : (tr ? "✕ Yanlış" : "✕ Wrong")}</p> : null}
     {currentQuestion.question_type === "classic" ? <textarea className="quiz-classic-answer" rows={6} value={answers[currentQuestion.id] ?? ""} disabled={Boolean(result)} placeholder={tr ? "Cevabını buraya yaz..." : "Write your answer here..."} onChange={(event) => { setAnswers((current) => ({ ...current, [currentQuestion.id]: event.target.value })); setWarning(null); }} /> : <div className="quiz-options">{renderedOptions.map((option) => { const selected = answers[currentQuestion.id] === option.value; return <button type="button" key={option.key} disabled={Boolean(result)} className={`quiz-option ${resultClass(currentQuestion, option.value)}`} onClick={() => { setAnswers((current) => ({ ...current, [currentQuestion.id]: option.value })); setWarning(null); }}><span className="quiz-radio">{selected ? "●" : "○"}</span>{option.letter ? <strong>{option.letter})</strong> : <strong /> }<span>{option.label}</span></button>; })}</div>}
     {currentResult && !currentResult.is_correct ? <p className="quiz-correction">{tr ? "Doğru cevap" : "Correct answer"}: {letters[optionKeys.findIndex((key) => currentQuestion[key] === currentResult.correct_answer)] ?? "–"}</p> : null}
     {currentResult?.explanation ? <p className="quiz-explanation">{currentResult.explanation}</p> : null}
     {warning ? <p className="quiz-message warning" role="alert">{warning}</p> : null}{error ? <p className="quiz-message error" role="alert">{error}</p> : null}
-    <nav className="quiz-navigation" aria-label={tr ? "Sınav soruları" : "Quiz questions"}><button type="button" disabled={currentIndex === 0 || busy} onClick={() => setCurrentIndex((index) => index - 1)}>← {tr ? "Önceki" : "Previous"}</button><span>{currentIndex + 1} / {questions.length}</span>{currentIndex < questions.length - 1 ? <button type="button" disabled={busy} onClick={() => setCurrentIndex((index) => index + 1)}>{tr ? "Sonraki" : "Next"} →</button> : result ? <button type="button" onClick={restart}>{tr ? "Tekrar Çöz" : "Try Again"}</button> : <button type="button" className="finish-quiz" disabled={busy} onClick={submitQuiz}>{busy ? (tr ? "Sonuçlar hesaplanıyor..." : "Calculating results...") : (tr ? "Sınavı Tamamla" : "Finish Quiz")}</button>}</nav>
+    <nav
+  className="quiz-navigation"
+  aria-label={tr ? "Sınav soruları" : "Quiz questions"}
+>
+  <button
+    type="button"
+    disabled={currentQuestionIndex === 0 || busy}
+    onClick={() =>
+      setCurrentQuestionIndex((index) => index - 1)
+    }
+  >
+    ← {tr ? "Önceki" : "Previous"}
+  </button>
+
+  <span>
+    {currentQuestionIndex + 1} / {questions.length}
+  </span>
+
+  {currentQuestionIndex < questions.length - 1 ? (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() =>
+        setCurrentQuestionIndex((index) => index + 1)
+      }
+    >
+      {tr ? "Sonraki" : "Next"} →
+    </button>
+  ) : result ? (
+    <button
+      type="button"
+      onClick={restart}
+    >
+      {tr ? "Tekrar Çöz" : "Try Again"}
+    </button>
+  ) : (
+    <button
+      type="button"
+      className="finish-quiz"
+      disabled={busy}
+      onClick={submitQuiz}
+    >
+      {busy
+        ? (tr
+          ? "Sonuçlar hesaplanıyor..."
+          : "Calculating results...")
+        : (tr
+          ? "Sınavı Tamamla"
+          : "Finish Quiz")}
+    </button>
+  )}
+</nav>
     {result ? <div className="quiz-result-actions"><button type="button" onClick={createAnother}>{tr ? "Yeni Sınav Oluştur" : "Create New Quiz"}</button></div> : null}
   </section>;
 }
