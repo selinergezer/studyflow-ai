@@ -5,7 +5,7 @@ import Button from "@/components/ui/Button";
 import { apiFetch, type Quiz, type QuizQuestion } from "@/lib/api";
 import { useLanguage } from "@/providers/LanguageProvider";
 
-type Difficulty = "easy" | "medium" | "hard";
+
 type ResultItem = { question_id: number; user_answer: string | null; correct_answer: string; is_correct: boolean; explanation: string | null };
 type QuizResult = { total_questions: number; correct: number; wrong: number; score: number; results: ResultItem[] };
 
@@ -16,7 +16,6 @@ export default function QuizPanel({ documentId, initialQuiz, initialResult, onQu
   const { language } = useLanguage();
   const tr = language === "tr";
   const [questionCount, setQuestionCount] = useState(10);
-  const [difficulty, setDifficulty] = useState<Difficulty>("medium");
   const [quiz, setQuiz] = useState<Quiz | null>(initialQuiz ?? null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<number, string>>({});
@@ -39,7 +38,15 @@ export default function QuizPanel({ documentId, initialQuiz, initialResult, onQu
 
   async function generateQuiz() {
     setBusy(true); setError(null); setWarning(null); setResult(null); setAnswers({}); setCurrentIndex(0);
-    try { const created = await apiFetch<Quiz>(`/quizzes/generate?document_id=${documentId}&question_count=${questionCount}&difficulty=${difficulty}`, { method: "POST" }); setQuiz(created); onQuizCreated?.(created); }
+    try {
+  const created = await apiFetch<Quiz>(
+    `/quizzes/generate?document_id=${documentId}&question_count=${questionCount}`,
+    { method: "POST" }
+  );
+
+  setQuiz(created);
+  onQuizCreated?.(created);
+}
     catch { setError(tr ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin." : "Data is currently unavailable. Please try again later."); }
     finally { setBusy(false); }
   }
@@ -68,11 +75,10 @@ export default function QuizPanel({ documentId, initialQuiz, initialResult, onQu
         <div className="quiz-builder-panel">
           <p className="notebook-label">{tr ? "SINAV HAZIRLA" : "PREPARE A QUIZ"}</p>
           <p className="quiz-builder-description">{tr ? "Bu PDF'den kendine özel bir tekrar sınavı oluştur." : "Create a custom review quiz from this PDF."}</p>
-          <fieldset className="quiz-setting"><legend>{tr ? "Soru sayısı" : "Question count"}</legend><div className="choice-row">{[5, 10, 15, 20].map((count) => <button key={count} type="button" className={`choice ${questionCount === count ? "active" : ""}`} aria-pressed={questionCount === count} onClick={() => setQuestionCount(count)}>{count}</button>)}</div></fieldset>
-          <fieldset className="quiz-setting"><legend>{tr ? "Zorluk seviyesi" : "Difficulty"}</legend><div className="choice-row">{([{ value: "easy", tr: "Kolay", en: "Easy" }, { value: "medium", tr: "Orta", en: "Medium" }, { value: "hard", tr: "Zor", en: "Hard" }] as const).map((option) => <button key={option.value} type="button" className={`choice ${difficulty === option.value ? "active" : ""}`} aria-pressed={difficulty === option.value} onClick={() => setDifficulty(option.value)}>{tr ? option.tr : option.en}</button>)}</div></fieldset>
+          <fieldset className="quiz-setting"><legend>{tr ? "Soru sayısı" : "Question count"}</legend><div className="choice-row">{[5, 10, 15].map((count) => <button key={count} type="button" className={`choice ${questionCount === count ? "active" : ""}`} aria-pressed={questionCount === count} onClick={() => setQuestionCount(count)}>{count}</button>)}</div></fieldset>
           <Button className="quiz-create-button" onClick={generateQuiz} disabled={busy}>{busy ? (tr ? "Sınav hazırlanıyor..." : "Preparing quiz...") : (tr ? "Sınavı Oluştur →" : "Create Quiz →")}</Button>
         </div>
-        <aside className="quiz-note" aria-hidden="true"><div className="quiz-doodle"><span>✓</span><i>?</i></div><p>{tr ? <>Soru sayısını ve zorluk seviyesini seç,<br />hemen sınavını oluştur!</> : <>Choose the number and difficulty,<br />then start your quiz!</>}</p><div className="hand-underline" /></aside>
+        <aside className="quiz-note" aria-hidden="true"><div className="quiz-doodle"><span>✓</span><i>?</i></div><p>{tr ? <>Soru sayısını seç,<br />hemen sınavını oluştur!</> : <>Choose the number of questions,<br />then start your quiz!</>}</p><div className="hand-underline" /></aside>
       </div>
       {error ? <p className="quiz-message error" role="alert">{error}</p> : null}
     </section>;

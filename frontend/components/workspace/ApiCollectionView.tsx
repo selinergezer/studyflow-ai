@@ -23,8 +23,6 @@ type FlashcardDocumentCard = {
   flashcardCount: number;
 };
 
-type Difficulty = "easy" | "medium" | "hard";
-
 export default function ApiCollectionView({
   kind,
 }: {
@@ -47,7 +45,6 @@ export default function ApiCollectionView({
   const [deletingQuizId, setDeletingQuizId] = useState<number | null>(null);
   const [showCreateQuiz, setShowCreateQuiz] = useState(false);
   const [questionCount, setQuestionCount] = useState(10);
-  const [difficulty, setDifficulty] = useState<Difficulty>("medium");
   const [creatingQuiz, setCreatingQuiz] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -176,7 +173,6 @@ export default function ApiCollectionView({
       setQuizzes((current) => [...current, normalized]);
       setShowCreateQuiz(false);
       setQuestionCount(10);
-      setDifficulty("medium");
       router.push(`/quiz/${quizId}?document_id=${selectedDocumentId}`);
     } catch {
       setError("Sınav oluşturulamadı. Lütfen tekrar deneyin.");
@@ -386,7 +382,14 @@ export default function ApiCollectionView({
             <h1 className="text-3xl font-semibold text-gray-950">{selectedDocument?.filename}</h1>
             <p className="mt-2 text-sm text-gray-500">Daha önce oluşturduğun sınavlar</p>
           </div>
-          <Button className="shrink-0 self-start" onClick={() => { setError(null); setQuestionCount(10); setDifficulty("medium"); setShowCreateQuiz(true); }}>
+            <Button
+  className="shrink-0 self-start"
+  onClick={() => {
+    setError(null);
+    setQuestionCount(10);
+    setShowCreateQuiz(true);
+  }}
+>
             <svg className="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
             Yeni Sınav Oluştur
           </Button>
@@ -416,10 +419,8 @@ export default function ApiCollectionView({
             <h2 id="create-quiz-title" className="text-lg font-semibold text-gray-950">Yeni Sınav Oluştur</h2>
             <p className="mt-2 truncate text-sm text-gray-500">{selectedDocument?.filename}</p>
             <div className="mt-6 grid gap-4 sm:grid-cols-2">
-              <label className="text-sm font-medium text-gray-700">Soru sayısı<select value={questionCount} disabled={creatingQuiz} onChange={(event) => setQuestionCount(Number(event.target.value))} className="mt-2 block h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-gray-900"><option value={5}>5</option><option value={10}>10</option><option value={15}>15</option><option value={20}>20</option></select></label>
-              <label className="text-sm font-medium text-gray-700">Zorluk<select value={difficulty} disabled={creatingQuiz} onChange={(event) => setDifficulty(event.target.value as Difficulty)} className="mt-2 block h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-gray-900"><option value="easy">Kolay</option><option value="medium">Orta</option><option value="hard">Zor</option></select></label>
+              <label className="text-sm font-medium text-gray-700">Soru sayısı<select value={questionCount} disabled={creatingQuiz} onChange={(event) => setQuestionCount(Number(event.target.value))} className="mt-2 block h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-gray-900"><option value={5}>5</option><option value={10}>10</option><option value={15}>15</option></select></label>
             </div>
-            <p className="mt-4 text-xs leading-5 text-gray-500">Zorluk seçimi mevcut backend tarafından henüz uygulanmamaktadır.</p>
             {error ? <p className="mt-4 text-sm text-red-600" role="alert">{error}</p> : null}
             <div className="mt-6 flex justify-end gap-3"><Button variant="secondary" disabled={creatingQuiz} onClick={() => setShowCreateQuiz(false)}>İptal</Button><Button disabled={creatingQuiz} onClick={createQuiz}>{creatingQuiz ? "Sınav hazırlanıyor..." : "Sınavı Oluştur"}</Button></div>
           </Card>

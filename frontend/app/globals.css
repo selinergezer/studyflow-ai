@@ -1595,7 +1595,34 @@ html[data-theme="dark"] .library-document-card:hover {
 @media (max-width:860px) { .document-quiz-workspace,.document-quiz-workspace.is-solving { grid-template-columns:1fr; gap:32px; }.document-quiz-workspace .quiz-builder-panel { max-width:none; }.document-quiz-history { border-top:1px dashed rgb(36 31 19 / .2); border-left:0; padding-top:25px; padding-left:0; } }
 
 /* Reusable flashcard collection and repeat-study flow */
-.flashcard-library-layout { display:grid; grid-template-columns:minmax(0,1.08fr) minmax(260px,.82fr); gap:38px; align-items:start; }.flashcard-library-layout > .document-setup-panel { max-width:470px; }.flashcard-history { min-width:0; border-left:1px dashed rgb(36 31 19 / .2); padding-left:30px; }.flashcard-history > .notebook-label { display:block; margin-bottom:16px; }.flashcard-history-card { position:relative; overflow:hidden; border:1px solid rgb(36 31 19 / .13); border-radius:5px; background:rgb(255 253 248 / .36); padding:18px 16px 15px; }.flashcard-history-tape { position:absolute; top:-2px; right:18px; width:40px; height:10px; background:#7fe0c4; opacity:.72; transform:rotate(2deg); }.flashcard-history-card h3 { margin:0 45px 6px 0; color:var(--ws-paper-text); font-family:var(--font-bricolage),sans-serif; font-size:14px; font-weight:650; }.flashcard-history-card p { margin:0; color:var(--ws-paper-dim); font-family:var(--font-space-mono),monospace; font-size:9.5px; text-transform:uppercase; }.flashcard-history-card button { margin-top:14px; color:#b87521; font-family:var(--font-space-mono),monospace; font-size:10px; font-weight:700; cursor:pointer; }.flashcard-history-card button:hover { text-decoration:underline; }.flashcard-back-button { color:#b87521; font-family:var(--font-space-mono),monospace; font-size:10px; font-weight:700; cursor:pointer; }.document-flashcards-panel.is-studying .flashcard-study { border-top:0; padding-top:0; }.flashcard-finished-actions { display:flex; flex-wrap:wrap; justify-content:center; gap:10px; margin-top:28px; }.flashcard-finished-actions button { margin:0 !important; }.workspace-page[data-workspace-theme="dark"] .flashcard-history { border-color:rgb(126 145 185 / .18); }.workspace-page[data-workspace-theme="dark"] .flashcard-history-card { border-color:var(--study-paper-border); background:var(--study-paper-elevated); }
+.flashcard-library-layout {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1.08fr) minmax(260px, .82fr);
+  gap: 38px;
+  align-items: start;
+}.flashcard-library-layout > .document-setup-panel { max-width:470px; }
+.flashcard-history {
+  min-width: 0;
+  height: 270px;
+  overflow-y: auto;
+  border-left: 1px dashed rgb(36 31 19 / .2);
+  padding-left: 30px;
+  padding-right: 8px;
+}
+.flashcard-history {
+  scrollbar-width: thin;
+}.flashcard-history::-webkit-scrollbar {
+  width: 6px;
+}
+
+.flashcard-history::-webkit-scrollbar-thumb {
+  background: rgb(36 31 19 / .25);
+  border-radius: 999px;
+}
+
+.flashcard-history::-webkit-scrollbar-track {
+  background: transparent;
+}.flashcard-history > .notebook-label { display:block; margin-bottom:16px; }.flashcard-history-card { position:relative; overflow:hidden; border:1px solid rgb(36 31 19 / .13); border-radius:5px; background:rgb(255 253 248 / .36); padding:18px 16px 15px; }.flashcard-history-tape { position:absolute; top:-2px; right:18px; width:40px; height:10px; background:#7fe0c4; opacity:.72; transform:rotate(2deg); }.flashcard-history-card h3 { margin:0 45px 6px 0; color:var(--ws-paper-text); font-family:var(--font-bricolage),sans-serif; font-size:14px; font-weight:650; }.flashcard-history-card p { margin:0; color:var(--ws-paper-dim); font-family:var(--font-space-mono),monospace; font-size:9.5px; text-transform:uppercase; }.flashcard-history-card button { margin-top:14px; color:#b87521; font-family:var(--font-space-mono),monospace; font-size:10px; font-weight:700; cursor:pointer; }.flashcard-history-card button:hover { text-decoration:underline; }.flashcard-back-button { color:#b87521; font-family:var(--font-space-mono),monospace; font-size:10px; font-weight:700; cursor:pointer; }.document-flashcards-panel.is-studying .flashcard-study { border-top:0; padding-top:0; }.flashcard-finished-actions { display:flex; flex-wrap:wrap; justify-content:center; gap:10px; margin-top:28px; }.flashcard-finished-actions button { margin:0 !important; }.workspace-page[data-workspace-theme="dark"] .flashcard-history { border-color:rgb(126 145 185 / .18); }.workspace-page[data-workspace-theme="dark"] .flashcard-history-card { border-color:var(--study-paper-border); background:var(--study-paper-elevated); }
 @media (max-width:860px) { .flashcard-library-layout { grid-template-columns:1fr; gap:32px; }.flashcard-library-layout > .document-setup-panel { max-width:none; }.flashcard-history { border-top:1px dashed rgb(36 31 19 / .2); border-left:0; padding-top:25px; padding-left:0; } }
 
 /* AI study planner */
@@ -2153,4 +2180,9 @@ html[data-theme="dark"] .library-document-card:hover {
   top: 18px;
   right: 18px;
   z-index: 5;
+}
+
+/* Flashcard ekranında dış sayfa scrollunu kapat */
+.document-detail-page:has(.flashcard-library-layout) {
+  overflow: hidden;
 }

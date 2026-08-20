@@ -783,7 +783,6 @@ export default function DocumentWorkspace({
                         5,
                         10,
                         15,
-                        20,
                       ].map(
                         (
                           count
@@ -850,13 +849,11 @@ export default function DocumentWorkspace({
                   </p>
 {flashcardBatches.length ? (
   <div
-    className="flashcard-history-list"
-    style={{
-      maxHeight: "520px",
-      overflowY: "auto",
-      paddingRight: "10px",
-    }}
-  >
+  className="flashcard-history-list"
+  style={{
+    paddingRight: "10px",
+  }}
+>
     {flashcardBatches.map(
       ([batchId, batchCards], index) => (
         <article
