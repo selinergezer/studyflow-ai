@@ -1,10 +1,12 @@
 from google import genai
 from google.genai import errors, types
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from typing import Literal, Optional
 from difflib import SequenceMatcher
 import httpx
 import json
+import math
+import random
 import re
 import time
 import unicodedata
@@ -76,6 +78,115 @@ def _generate_with_ollama(
         )
 
     return generated_text.strip()
+# =========================================================
+# LM STUDIO CLIENT
+# =========================================================
+
+def _generate_with_lmstudio(
+    prompt: str,
+    *,
+    json_response: bool = False,
+    json_schema: Optional[dict] = None,
+    num_predict: int = 900,
+) -> str:
+    payload = {
+        "model": "qwen2.5-3b-instruct-mlx",
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "temperature": 0.1,
+        "max_tokens": num_predict,
+        "stream": False,
+    }
+
+    if json_schema is not None:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "structured_response",
+                "schema": json_schema,
+            },
+        }
+    elif json_response:
+        payload["response_format"] = {
+            "type": "json_object",
+        }
+
+    try:
+        response = httpx.post(
+            "http://host.docker.internal:1234/v1/chat/completions",
+            json=payload,
+            timeout=120.0,
+        )
+
+        response.raise_for_status()
+        data = response.json()
+
+    except httpx.HTTPStatusError as error:
+        print(
+            f"LM Studio HTTP hatası: "
+            f"{error.response.status_code} - "
+            f"{error.response.text}"
+        )
+        raise OllamaServiceError(
+            "LM Studio geçerli bir yanıt döndürmedi."
+        ) from error
+
+    except httpx.RequestError as error:
+        print(f"LM Studio bağlantı hatası: {repr(error)}")
+        raise OllamaServiceError(
+            "LM Studio servisine ulaşılamıyor."
+        ) from error
+
+    except (
+        json.JSONDecodeError,
+        ValueError,
+        KeyError,
+        IndexError,
+    ) as error:
+        raise OllamaServiceError(
+            "LM Studio geçerli bir yanıt oluşturamadı."
+        ) from error
+
+    generated_text = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content")
+    )
+
+    if (
+        not isinstance(generated_text, str)
+        or not generated_text.strip()
+    ):
+        raise OllamaServiceError(
+            "LM Studio geçerli bir yanıt oluşturamadı."
+        )
+
+    return generated_text.strip()
+
+
+def _clean_json_response(raw_response: str) -> str:
+    cleaned = raw_response.strip()
+
+    if cleaned.startswith("```"):
+        cleaned = re.sub(
+            r"^```(?:json)?\s*",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\s*```$",
+            "",
+            cleaned,
+        )
+
+    cleaned = cleaned.strip()
+    _, json_end = json.JSONDecoder().raw_decode(cleaned)
+    return cleaned[:json_end].strip()
 
 
 # =========================================================
@@ -99,8 +210,8 @@ class QuizQuestion(BaseModel):
 class OllamaQuizQuestion(BaseModel):
     source_fact: str = Field(min_length=1, max_length=500)
     question_text: str
-    options: list[str] = Field(min_length=5, max_length=5)
-    correct_answer: Literal["A", "B", "C", "D", "E"]
+    correct_option: str
+    distractors: list[str] = Field(min_length=4, max_length=4)
 
 
 class QuizResponse(BaseModel):
@@ -590,63 +701,14 @@ def _validate_quiz(
         )
 
     for index, question in enumerate(quiz.questions, start=1):
-
-        if question.question_type != "multiple_choice":
-            raise ValueError(
-                f"{index}. sorunun soru tipi geçersiz: "
-                f"{question.question_type}"
-            )
-
         if not question.question_text.strip():
             raise ValueError(f"{index}. sorunun soru metni boş.")
 
         question_text = question.question_text.strip()
 
-        if _is_obviously_broken_question(question_text):
-            raise ValueError(
-                f"{index}. sorunun metni anlamsız veya eksik görünüyor."
-            )
-
-        if len(_SUBQUESTION_NUMBERING.findall(question_text)) >= 2:
-            raise ValueError(
-                f"{index}. sorunun metninde birden fazla alt soru var."
-            )
-
-        if len(_SUBQUESTION_LETTERING.findall(question_text)) >= 2:
-            raise ValueError(
-                f"{index}. sorunun metninde birden fazla alt soru var."
-            )
-
-        if len(_EMBEDDED_OPTION.findall(question_text)) >= 3:
+        if len(_EMBEDDED_OPTION.findall(question_text)) >= 5:
             raise ValueError(
                 f"{index}. sorunun seçenekleri question_text içine gömülmüş."
-            )
-
-        if _VAGUE_QUESTION_STEM.search(question_text):
-            raise ValueError(
-                f"{index}. sorunun soru kökü belirsiz; neyin sorulduğu açık değil."
-            )
-
-        if _looks_like_information_block(question_text):
-            raise ValueError(
-                f"{index}. sorunun metni soru yerine çok maddeli bir bilgi bloğu içeriyor."
-            )
-
-        question_mark_count = question_text.count("?") + question_text.count("؟")
-
-        if question_mark_count > 2:
-            raise ValueError(
-                f"{index}. sorunun metninde gereksiz sayıda soru işareti var."
-            )
-
-        normalized_for_tasks = question_text.casefold()
-
-        if (
-            _OPEN_ENDED_TASK.search(normalized_for_tasks)
-            or len(_TASK_VERB.findall(normalized_for_tasks)) >= 2
-        ):
-            raise ValueError(
-                f"{index}. soru açık uçlu veya birden fazla görev içeriyor."
             )
 
         normalized_question = _normalized_question_text(question_text)
@@ -657,22 +719,14 @@ def _validate_quiz(
 
         for previous_text in comparison_texts:
             normalized_previous = _normalized_question_text(previous_text)
-            similarity = SequenceMatcher(
-                None,
-                normalized_question,
-                normalized_previous,
-            ).ratio()
 
-            if normalized_question == normalized_previous or similarity >= 0.9:
+            if normalized_question == normalized_previous:
                 raise ValueError(
-                    f"{index}. soru önceki bir soruyla aşırı benzer."
+                    f"{index}. soru önceki bir soruyla aynı."
                 )
 
         if not question.correct_answer.strip():
             raise ValueError(f"{index}. sorunun doğru cevabı boş.")
-
-        if not question.explanation.strip():
-            raise ValueError(f"{index}. sorunun açıklaması boş.")
 
         options = [
             question.option_a,
@@ -687,47 +741,11 @@ def _validate_quiz(
                 f"{index}. multiple choice sorusunda eksik veya boş şık var."
             )
 
-        if any(_OPTION_PREFIX.match(option) for option in options):
-            raise ValueError(
-                f"{index}. multiple choice seçeneği A), B) gibi seçenek etiketi içeriyor."
-            )
-
         normalized_options = [option.strip().casefold() for option in options]
 
         if len(set(normalized_options)) != 5:
             raise ValueError(
                 f"{index}. multiple choice sorusunda tekrarlanan şık var."
-            )
-
-        canonical_options = [_canonical_option(option) for option in options]
-
-        if len(set(canonical_options)) != 5:
-            raise ValueError(
-                f"{index}. soruda anlamsal olarak tekrarlanan seçenek var."
-            )
-
-        single_number_option_count = sum(
-            _SINGLE_NUMBER_OPTION.fullmatch(option.strip()) is not None
-            for option in options
-        )
-
-        if (
-            _RANGE_QUESTION.search(question_text)
-            and single_number_option_count >= 4
-        ):
-            raise ValueError(
-                f"{index}. aralık sorusu yalnızca tekil sayısal seçenekler içeriyor."
-            )
-
-        generic_option_count = sum(
-            _normalized_question_text(option) in _GENERIC_OPTION_VALUES
-            for option in options
-        )
-
-        if generic_option_count >= 3:
-            raise ValueError(
-                f"{index}. soru doğru-yanlış kılığına sokulmuş veya "
-                "yapay dolgu seçenekleri içeriyor."
             )
 
         question.correct_answer = question.correct_answer.strip().upper()
@@ -741,23 +759,356 @@ def _validate_quiz(
     return quiz
 
 
+def _validate_single_quiz_question(
+    question: QuizQuestion,
+    previous_question_texts: list[str],
+) -> QuizQuestion:
+    quiz = QuizResponse(questions=[question])
+    _validate_quiz(
+        quiz,
+        1,
+        previous_question_texts=previous_question_texts,
+    )
+    return question
+
+
 def _to_quiz_question(generated: OllamaQuizQuestion) -> QuizQuestion:
-    normalized_options = [
-        _OPTION_PREFIX.sub("", option, count=1).strip()
-        for option in generated.options
+    correct_option = _OPTION_PREFIX.sub(
+        "",
+        generated.correct_option,
+        count=1,
+    ).strip()
+    distractors = [
+        _OPTION_PREFIX.sub("", item, count=1).strip()
+        for item in generated.distractors
     ]
+
+    if not correct_option:
+        raise ValueError("correct_option boş.")
+
+    if len(distractors) != 4 or any(
+        not distractor for distractor in distractors
+    ):
+        raise ValueError("Tam 4 dolu distractor gerekli.")
+
+    options = [correct_option, *distractors]
+    normalized_options = [
+        option.casefold()
+        for option in options
+    ]
+
+    if len(set(normalized_options)) != 5:
+        raise ValueError(
+            "correct_option ve distractors toplam 5 benzersiz seçenek olmalı."
+        )
+
+    random.shuffle(options)
+    correct_index = options.index(correct_option)
+    answer_letters = ["A", "B", "C", "D", "E"]
+    correct_answer = answer_letters[correct_index]
 
     return QuizQuestion(
         question_type="multiple_choice",
         question_text=generated.question_text,
-        option_a=normalized_options[0],
-        option_b=normalized_options[1],
-        option_c=normalized_options[2],
-        option_d=normalized_options[3],
-        option_e=normalized_options[4],
-        correct_answer=generated.correct_answer,
-        explanation=f"Doğru cevap: {generated.correct_answer}",
+        option_a=options[0],
+        option_b=options[1],
+        option_c=options[2],
+        option_d=options[3],
+        option_e=options[4],
+        correct_answer=correct_answer,
+        explanation=f"Doğru cevap: {correct_answer}",
     )
+
+
+def _source_fact_supported(
+    source_fact: str,
+    context_window: str,
+) -> bool:
+    normalized_source_fact = source_fact.strip().casefold()
+
+    if (
+        normalized_source_fact
+        and normalized_source_fact in context_window.casefold()
+    ):
+        return True
+
+    stop_words = {
+        "and", "are", "for", "from", "have", "is", "of", "that",
+        "the", "this", "to", "with",
+        "bir", "bu", "göre", "her", "için", "içinde", "ile", "ise",
+        "olan", "olarak", "üzerinde", "ve", "veya", "ya",
+    }
+
+    def meaningful_tokens(value: str) -> list[str]:
+        return [
+            token
+            for token in re.findall(r"[^\W\d_]+", value.casefold())
+            if (
+                token not in stop_words
+                and len(token) >= 3
+            )
+        ]
+
+    source_fact_tokens = meaningful_tokens(source_fact)
+
+    if not source_fact_tokens:
+        return True
+
+    context_tokens = set(meaningful_tokens(context_window))
+    matched_count = sum(
+        token in context_tokens
+        for token in source_fact_tokens
+    )
+    return matched_count / len(source_fact_tokens) >= 0.25
+
+
+def _find_best_source_sentence(
+    source_fact: str,
+    context_window: str,
+) -> Optional[str]:
+    def normalize(value: str) -> str:
+        return " ".join(
+            re.sub(r"[^\w\s]", " ", value.casefold()).split()
+        )
+
+    candidates = [
+        candidate.strip()
+        for candidate in re.split(
+            r"(?<=[.!?])\s+|\n+",
+            context_window,
+        )
+        if len(candidate.strip()) >= 12
+    ]
+    normalized_source_fact = normalize(source_fact)
+
+    if not normalized_source_fact or not candidates:
+        return None
+
+    stop_words = {
+        "and", "are", "for", "from", "is", "of", "that", "the",
+        "this", "to", "with",
+        "bir", "bu", "için", "ile", "olan", "olarak", "ve",
+    }
+    source_tokens = {
+        token
+        for token in normalized_source_fact.split()
+        if token not in stop_words and len(token) >= 3
+    }
+    best_candidate = None
+    best_score = 0.0
+
+    for candidate in candidates:
+        normalized_candidate = normalize(candidate)
+
+        if normalized_source_fact in normalized_candidate:
+            return candidate
+
+        similarity = SequenceMatcher(
+            None,
+            normalized_source_fact,
+            normalized_candidate,
+        ).ratio()
+        candidate_tokens = set(normalized_candidate.split())
+        token_overlap = (
+            len(source_tokens & candidate_tokens) / len(source_tokens)
+            if source_tokens
+            else 0.0
+        )
+
+        if similarity >= 0.45 or token_overlap >= 0.25:
+            candidate_score = max(similarity, token_overlap)
+
+            if candidate_score > best_score:
+                best_candidate = candidate
+                best_score = candidate_score
+
+    return best_candidate
+
+
+def _correct_option_supported_by_fact(
+    correct_option: str,
+    source_fact: str,
+) -> bool:
+    def normalized_text(value: str) -> str:
+        return " ".join(
+            re.findall(r"[^\W\d_]+", value.casefold())
+        )
+
+    normalized_option = normalized_text(correct_option)
+    normalized_fact = normalized_text(source_fact)
+
+    if normalized_option and normalized_option in normalized_fact:
+        return True
+
+    stop_words = {
+        "and", "are", "for", "from", "of", "the", "to", "with",
+        "bir", "bu", "için", "ile", "olan", "olarak", "ve",
+    }
+    technical_short_terms = {"xp"}
+    option_tokens = [
+        token
+        for token in normalized_option.split()
+        if (
+            token not in stop_words
+            and (
+                len(token) >= 3
+                or token in technical_short_terms
+            )
+        )
+    ]
+
+    if not option_tokens:
+        return False
+
+    fact_tokens = set(normalized_fact.split())
+    matched_count = sum(
+        token in fact_tokens
+        for token in option_tokens
+    )
+    return matched_count / len(option_tokens) >= 0.25
+
+
+def _detect_quiz_language(text: str) -> str:
+    normalized_text = text.casefold()
+    words = re.findall(r"[^\W\d_]+", normalized_text)
+    turkish_words = {
+        "ve", "bir", "bu", "için", "ile", "olan", "olarak", "daha",
+        "göre", "yazılım", "geliştirme", "model", "gereksinim",
+        "tasarım", "süreç", "proje", "kullanıcı", "takım",
+    }
+    english_words = {
+        "the", "and", "of", "to", "in", "is", "are", "for", "with",
+        "that", "this", "from", "software", "development", "model",
+        "requirements", "design", "process", "project", "code", "user",
+        "team",
+    }
+    english_common_words = {
+        "the", "and", "of", "to", "in", "is", "are", "for", "with",
+        "that", "this", "from",
+    }
+    turkish_common_words = {
+        "ve", "bir", "bu", "için", "ile", "olan", "olarak", "daha",
+        "göre",
+    }
+    english_score = sum(word in english_words for word in words)
+    turkish_score = sum(word in turkish_words for word in words)
+    turkish_character_count = sum(
+        character in "çğıöşü"
+        for character in normalized_text
+    )
+    turkish_score += min(turkish_character_count, 10) * 0.1
+
+    if abs(english_score - turkish_score) <= 1:
+        english_common_count = sum(
+            word in english_common_words
+            for word in words
+        )
+        turkish_common_count = sum(
+            word in turkish_common_words
+            for word in words
+        )
+
+        if english_common_count != turkish_common_count:
+            return (
+                "en"
+                if english_common_count > turkish_common_count
+                else "tr"
+            )
+
+    return "en" if english_score > turkish_score else "tr"
+
+
+def _quiz_item_matches_language(
+    question_text: str,
+    options: list[str],
+    target_language: str,
+) -> bool:
+    normalized_question = question_text.strip().casefold()
+
+    if target_language == "tr":
+        return re.match(
+            r"^(?:which(?:\s+of\s+the\s+following)?|what\s+is|how\s+does|why\s+does)\b",
+            normalized_question,
+        ) is None
+
+    return re.match(
+        r"^(?:aşağıdakilerden|hangisi|nedir|nasıl|hangi|ne\s+zaman)\b",
+        normalized_question,
+    ) is None
+
+
+def _quiz_context_windows(
+    text: str,
+    question_count: int,
+    window_chars: int = 1600,
+) -> list[str]:
+    cleaned_text = text.strip()
+
+    if not cleaned_text:
+        return [""] * question_count
+
+    window_size = min(window_chars, len(cleaned_text))
+    windows = []
+
+    for index in range(question_count):
+        anchor = (
+            len(cleaned_text) // 2
+            if question_count == 1
+            else round(
+                (len(cleaned_text) - 1)
+                * index
+                / (question_count - 1)
+            )
+        )
+        window_start = max(
+            0,
+            min(
+                anchor - (window_size // 2),
+                len(cleaned_text) - window_size,
+            ),
+        )
+        window_end = min(
+            len(cleaned_text),
+            window_start + window_size,
+        )
+
+        if window_start > 0:
+            boundary_end = min(window_start + 120, window_end)
+            boundary = cleaned_text.find(
+                "\n",
+                window_start,
+                boundary_end,
+            )
+
+            if boundary == -1:
+                boundary = cleaned_text.find(
+                    " ",
+                    window_start,
+                    boundary_end,
+                )
+
+            if boundary != -1:
+                window_start = boundary + 1
+
+        if window_end < len(cleaned_text):
+            boundary_start = max(
+                window_start,
+                window_end - 160,
+            )
+            sentence_boundaries = [
+                cleaned_text.rfind(marker, boundary_start, window_end)
+                for marker in (".", "!", "?", "\n")
+            ]
+            boundary = max(sentence_boundaries)
+
+            if boundary > window_start:
+                window_end = boundary + 1
+
+        windows.append(
+            cleaned_text[window_start:window_end].strip()
+        )
+
+    return windows
 
 
 def generate_quiz(
@@ -766,208 +1117,470 @@ def generate_quiz(
 ):
     quiz_source = _prepare_quiz_source(text)
     quiz_started_at = time.perf_counter()
+    quiz_language = _detect_quiz_language(quiz_source)
+    language_instruction = (
+        "OUTPUT LANGUAGE: ENGLISH\n"
+        "- question_text MUST be English.\n"
+        "- correct_option MUST be English.\n"
+        "- all distractors MUST be English.\n"
+        "- The entire quiz must remain in English.\n"
+        "- Even if the current source section contains a few Turkish "
+        "sentences, translate that information into natural English.\n"
+        "- Do not mix Turkish and English except for technical proper names.\n"
+        "- Use only instructional course content to create questions.\n"
+        "- Ignore document metadata such as university names, department "
+        "names, course codes, lecturer names, page numbers, slide numbers, "
+        "headers and footers.\n"
+        "- Do not mention the university, department, course code, lecturer, "
+        "slide or document metadata in question_text.\n"
+        "- Do not use phrases such as 'according to [university/department]'.\n"
+        "- source_fact must represent actual instructional content, not "
+        "document metadata.\n"
+        "- Preserve the exact meaning and terminology of the source.\n"
+        "- If the source names a specific phase, stage, role, model or "
+        "concept, do not replace it with a different one.\n"
+        "- Do not ask about Requirements Planning using a fact that belongs "
+        "to User Design.\n"
+        "- Do not rename or merge distinct stages.\n"
+        "- Do not introduce terminology that contradicts the source.\n"
+        "- If the source says a concept is not a methodology, do not call it "
+        "a methodology; prefer the source's terminology, such as Agile "
+        "approach or Agile software development.\n"
+        "- Do not output these examples."
+        if quiz_language == "en"
+        else
+        "ÇIKTI DİLİ: TÜRKÇE\n"
+        "- question_text Türkçe olmalı.\n"
+        "- correct_option Türkçe olmalı.\n"
+        "- tüm distractors Türkçe olmalı.\n"
+        "- Quiz boyunca dil Türkçe kalmalı.\n"
+        "- Teknik özel isimler gerektiğinde İngilizce kalabilir.\n"
+        "- Soruları yalnızca öğretici ders içeriğinden oluştur.\n"
+        "- Üniversite ve bölüm adları, ders kodları, öğretim elemanı adları, "
+        "sayfa ve slayt numaraları, üstbilgi ve altbilgi gibi belge "
+        "metadatalarını yok say.\n"
+        "- question_text içinde üniversite, bölüm, ders kodu, öğretim "
+        "elemanı, slayt veya belge metadatasından bahsetme.\n"
+        "- '[üniversite/bölüm] bilgisine göre' gibi ifadeler kullanma.\n"
+        "- source_fact belge metadatasını değil, gerçek öğretici ders "
+        "içeriğini temsil etmelidir.\n"
+        "- Kaynağın anlamını ve terminolojisini tam olarak koru.\n"
+        "- Kaynak belirli bir aşama, evre, rol, model veya kavram adlandırıyorsa "
+        "onu başka bir aşama, evre, rol, model veya kavramla değiştirme.\n"
+        "- User Design aşamasına ait bir bilgiyle Requirements Planning "
+        "hakkında soru sorma.\n"
+        "- Birbirinden farklı aşamaları yeniden adlandırma veya birleştirme.\n"
+        "- Kaynakla çelişen terminoloji kullanma.\n"
+        "- Kaynak bir kavramın metodoloji olmadığını söylüyorsa onu metodoloji "
+        "olarak adlandırma; Agile yaklaşımı veya Agile yazılım geliştirme gibi "
+        "kaynağın terminolojisini tercih et.\n"
+        "- Bu örnekleri çıktıya yazma."
+    )
+    batch_size_limit = 2
+    window_count = max(
+        question_count * 2,
+        8,
+    )
+    context_windows = _quiz_context_windows(
+        quiz_source,
+        window_count,
+    )
+    accepted_questions: list[QuizQuestion] = []
+    accepted_source_facts: list[str] = []
+    used_context_indices: set[int] = set()
+    expected_batches = math.ceil(
+        question_count / batch_size_limit
+    )
+    extra_attempts = 3 if question_count <= 5 else 4
+    max_batch_attempts = expected_batches + extra_attempts
+    batch_attempts = 0
+    last_error = None
+    retry_instruction = ""
 
-    max_context_chars = 18000
+    print(
+        f"LM Studio Quiz target language: {quiz_language}"
+    )
 
-    if len(quiz_source) <= max_context_chars:
-        context = quiz_source
-    else:
-        chunk_size = max_context_chars // 3
-
-        start_chunk = quiz_source[:chunk_size]
-
-        middle_start = max(
-            0,
-            (len(quiz_source) // 2) - (chunk_size // 2)
+    while (
+        len(accepted_questions) < question_count
+        and batch_attempts < max_batch_attempts
+    ):
+        remaining = question_count - len(accepted_questions)
+        batch_size = min(
+            batch_size_limit,
+            remaining,
         )
-        middle_chunk = quiz_source[
-            middle_start:middle_start + chunk_size
+        available_indices = [
+            index
+            for index in range(len(context_windows))
+            if index not in used_context_indices
         ]
 
-        end_chunk = quiz_source[-chunk_size:]
+        if len(available_indices) < batch_size:
+            used_context_indices.clear()
+            available_indices = list(range(len(context_windows)))
 
-        context = (
-            start_chunk
-            + "\n\n--- KAYNAĞIN ORTA BÖLÜMÜ ---\n\n"
-            + middle_chunk
-            + "\n\n--- KAYNAĞIN SON BÖLÜMÜ ---\n\n"
-            + end_chunk
+        context_indices = available_indices[:batch_size]
+
+        for context_index in context_indices:
+            used_context_indices.add(context_index)
+
+        selected_contexts = [
+            context_windows[context_index]
+            for context_index in context_indices
+        ]
+        source_sections = "\n\n".join(
+            f"SOURCE SECTION {section_index}:\n{context_window}"
+            for section_index, context_window in enumerate(
+                selected_contexts,
+                start=1,
+            )
         )
+        section_rules = "\n".join(
+            f"- Question {section_index} must use ONLY SOURCE SECTION "
+            f"{section_index}."
+            for section_index in range(1, batch_size + 1)
+        )
+        recent_source_facts = accepted_source_facts[-6:]
+        used_facts_prompt = "\n".join(
+            f"- {source_fact}"
+            for source_fact in recent_source_facts
+        ) or "- None"
+        batch_num_predict = (
+            350
+            if batch_size == 1
+            else 550
+        )
+        batch_schema = {
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "minItems": batch_size,
+                    "maxItems": batch_size,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source_fact": {"type": "string"},
+                            "question_text": {"type": "string"},
+                            "correct_option": {"type": "string"},
+                            "distractors": {
+                                "type": "array",
+                                "minItems": 4,
+                                "maxItems": 4,
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": [
+                            "source_fact",
+                            "question_text",
+                            "correct_option",
+                            "distractors",
+                        ],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["questions"],
+            "additionalProperties": False,
+        }
+        prompt = f"""
+Create EXACTLY {batch_size} multiple-choice question(s).
 
-    question_schema = OllamaQuizQuestion.model_json_schema()
+{language_instruction}
 
-    batch_schema = {
-        "type": "object",
-        "properties": {
-            "questions": {
-                "type": "array",
-                "minItems": question_count,
-                "maxItems": question_count,
-                "items": question_schema,
-            }
-        },
-        "required": ["questions"],
-        "additionalProperties": False,
-    }
+PREVIOUSLY USED FACTS:
+{used_facts_prompt}
 
-    prompt = f"""
-Aşağıdaki ders notuna dayanarak TAM OLARAK {question_count} adet
-çoktan seçmeli sınav sorusu oluştur.
+RULES:
+- Use a different fact or concept for each question.
+- Do not create a question from any previously used fact.
+- Choose a different fact or concept from the assigned source section.
+- Do not reproduce any previously generated question.
+- The wording may be similar, but the tested fact must be different.
+- Do not repeat the exact same question.
+- Copy source_fact as closely as possible from its assigned SOURCE SECTION.
+- source_fact must be at most one short sentence.
+- question_text must test exactly the fact expressed in source_fact.
+- Do not broaden, narrow or change the meaning of source_fact.
+- If source_fact describes one stage, ask about that stage only.
+- If source_fact describes one principle, ask about that principle only.
+- The question stem and correct_option must refer to the same concept or stage described by source_fact.
+- question_text must be short and direct.
+- correct_option must be clearly correct according to source_fact.
+- correct_option must be at most 12 words.
+- Produce exactly 4 plausible but incorrect distractors, each at most 12 words.
+- correct_option and 4 distractors must be EXACTLY 5 distinct texts.
+- Do not repeat an option with a different label or minor wording changes.
+- correct_option must not match any distractor.
+- Distractors must not match each other.
+- Before returning JSON, internally verify that all five options are unique.
+- Before returning JSON, internally verify that correct_option directly answers question_text.
+- Verify that question_text and correct_option are supported by the same source_fact.
+- If they do not match, rewrite the question before returning JSON.
+- Do not write this internal check in the output.
+- Do not use information outside the assigned SOURCE SECTION.
+{section_rules}
+- Do not produce explanations or markdown.
+- Return only the requested JSON and write nothing after it.
+{retry_instruction}
 
-KURALLAR:
-
-- TAM OLARAK {question_count} soru üret.
-- Bütün sorular Türkçe olsun.
-- Bütün seçenekler Türkçe olsun.
-- Her soru farklı bir kavramı ölçsün.
-- Aynı veya çok benzer soruları tekrar etme.
-- Her soru için source_fact alanına kaynak metinden 1-2 kısa cümle yaz.
-- Soruyu ve doğru cevabı yalnızca source_fact üzerinden oluştur.
-- Kaynakta bulunmayan bilgi uydurma.
-- Soru tek başına anlaşılabilir olsun.
-- Alt soru oluşturma.
-- Açık uçlu soru oluşturma.
-- Her soruda tam olarak 5 seçenek olsun.
-- Yalnızca bir seçenek doğru olsun.
-- Seçenekler anlamlı ve birbirinden farklı olsun.
-- Seçeneklerin başına A), B), C), D), E) yazma.
-- correct_answer yalnızca A, B, C, D veya E olsun.
-- Uzun ve gereksiz açıklamalar üretme.
-- Kaynağın farklı bölümlerinden soru seç.
-- Aynı başlık veya aynı kavramdan birden fazla soru üretme.
-- Soruları mümkün olduğunca farklı alt konulara dağıt.
-- Eğer kaynakta yeterli çeşitlilik varsa aynı kavram ailesini tekrar etme.
-- Yalnızca geçerli JSON döndür.
-- JSON dışında hiçbir şey yazma.
-
-ÇIKTI YAPISI:
-
+OUTPUT:
 {{
   "questions": [
     {{
       "source_fact": "...",
       "question_text": "...",
-      "options": [
-        "...",
-        "...",
-        "...",
-        "...",
-        "..."
-      ],
-      "correct_answer": "A"
+      "correct_option": "...",
+      "distractors": ["...", "...", "...", "..."]
     }}
   ]
 }}
 
-DERS NOTU:
-
-{context}
+{source_sections}
 """
-
-    max_attempts = 2
-    last_error = None
-
-    for attempt in range(1, max_attempts + 1):
-        attempt_started_at = time.perf_counter()
+        batch_attempts += 1
+        batch_started_at = time.perf_counter()
+        produced_count = 0
+        accepted_in_batch = 0
+        rejected_in_batch = 0
 
         try:
-            num_predict = min(
-                5000,
-                max(900, question_count * 260)
-            )
-
-            raw_response = _generate_with_ollama(
+            raw_response = _generate_with_lmstudio(
                 prompt,
                 json_schema=batch_schema,
-                num_predict=num_predict,
+                num_predict=batch_num_predict,
             )
+            cleaned_response = _clean_json_response(raw_response)
+            parsed = json.loads(cleaned_response)
 
-            parsed = json.loads(raw_response)
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    "LM Studio yanıtı JSON nesnesi değil."
+                )
 
             raw_questions = parsed.get("questions")
 
             if not isinstance(raw_questions, list):
                 raise ValueError(
-                    "Ollama yanıtında questions listesi bulunamadı."
+                    "LM Studio yanıtında questions listesi bulunamadı."
                 )
 
-            if len(raw_questions) != question_count:
-                raise ValueError(
-                    f"{question_count} soru bekleniyordu, "
-                    f"{len(raw_questions)} soru üretildi."
-                )
+            produced_count = len(raw_questions)
 
-            questions: list[QuizQuestion] = []
+            for raw_index, raw_question in enumerate(
+                raw_questions[:batch_size]
+            ):
+                context_window = selected_contexts[raw_index]
 
-            for raw_question in raw_questions:
-                generated = OllamaQuizQuestion.model_validate(
-                    raw_question
-                )
+                try:
+                    raw_question_for_validation = raw_question
 
-                _validate_ollama_source_fact(generated)
+                    if isinstance(raw_question, dict):
+                        raw_question_for_validation = dict(raw_question)
+                        source_fact = raw_question_for_validation.get(
+                            "source_fact"
+                        )
 
-                generated_question = _to_quiz_question(
-                    generated
-                )
+                        if isinstance(source_fact, str):
+                            source_fact = source_fact.strip()
 
-                questions.append(generated_question)
+                            if len(source_fact) > 500:
+                                shortened_source_fact = source_fact[:500]
+                                sentence_end = max(
+                                    shortened_source_fact.rfind(marker)
+                                    for marker in (".", "!", "?")
+                                )
+                                source_fact = (
+                                    shortened_source_fact[:sentence_end + 1]
+                                    if sentence_end >= 0
+                                    else shortened_source_fact
+                                )
 
-            quiz = QuizResponse(questions=questions)
+                            raw_question_for_validation[
+                                "source_fact"
+                            ] = source_fact
 
-            quiz = _validate_quiz(
-                quiz,
-                question_count
-            )
+                        if not isinstance(source_fact, str) or not source_fact:
+                            raw_question_for_validation["source_fact"] = "."
 
-            attempt_duration = (
-                time.perf_counter() - attempt_started_at
-            )
+                        for field_name in (
+                            "question_text",
+                            "correct_option",
+                        ):
+                            field_value = raw_question_for_validation.get(
+                                field_name
+                            )
 
-            total_duration = (
-                time.perf_counter() - quiz_started_at
-            )
+                            if isinstance(field_value, str):
+                                raw_question_for_validation[field_name] = (
+                                    field_value.strip()
+                                )
 
-            print(
-                f"Ollama Quiz tek çağrıda tamamlandı: "
-                f"{len(quiz.questions)} soru, "
-                f"AI süresi {attempt_duration:.1f} sn, "
-                f"toplam {total_duration:.1f} sn"
-            )
+                        distractors = raw_question_for_validation.get(
+                            "distractors"
+                        )
 
-            return quiz
+                        if not isinstance(distractors, list):
+                            raise ValueError("distractors list olmalı.")
 
-        except (
-            json.JSONDecodeError,
-            ValueError,
-        ) as error:
+                        if len(distractors) != 4:
+                            raise ValueError(
+                                "Tam 4 distractor gerekli."
+                            )
+
+                        raw_question_for_validation["distractors"] = [
+                            distractor.strip()
+                            if isinstance(distractor, str)
+                            else distractor
+                            for distractor in distractors
+                        ]
+
+                        correct_option = raw_question_for_validation.get(
+                            "correct_option"
+                        )
+
+                        if (
+                            isinstance(correct_option, str)
+                            and not correct_option
+                        ):
+                            raise ValueError("correct_option boş.")
+
+                    try:
+                        generated = OllamaQuizQuestion.model_validate(
+                            raw_question_for_validation
+                        )
+                    except ValidationError as error:
+                        last_error = error
+                        rejected_in_batch += 1
+                        first_error = error.errors()[0]
+                        field_name = ".".join(
+                            str(item)
+                            for item in first_error.get("loc", ())
+                        )
+                        print(
+                            f"LM Studio Quiz batch {batch_attempts} "
+                            f"soru {raw_index + 1} Pydantic hatası: "
+                            f"{field_name} {first_error.get('msg', error)}"
+                        )
+                        continue
+
+                    best_source_sentence = _find_best_source_sentence(
+                        generated.source_fact,
+                        context_window,
+                    )
+
+                    if best_source_sentence is None:
+                        raise ValueError(
+                            "source_fact kaynak bölümü tarafından "
+                            "yeterince desteklenmiyor."
+                        )
+
+                    generated.source_fact = best_source_sentence
+
+                    if not _source_fact_supported(
+                        generated.source_fact,
+                        context_window,
+                    ):
+                        raise ValueError(
+                            "source_fact kaynak bölümü tarafından "
+                            "yeterince desteklenmiyor."
+                        )
+
+                    generated_question = _to_quiz_question(generated)
+                    options = [
+                        generated_question.option_a,
+                        generated_question.option_b,
+                        generated_question.option_c,
+                        generated_question.option_d,
+                        generated_question.option_e,
+                    ]
+
+                    if not _quiz_item_matches_language(
+                        generated_question.question_text,
+                        options,
+                        quiz_language,
+                    ):
+                        raise ValueError(
+                            "Quiz sorusu hedef dille tutarlı değil."
+                        )
+
+                    _validate_single_quiz_question(
+                        generated_question,
+                        [
+                            question.question_text
+                            for question in accepted_questions
+                        ],
+                    )
+                    accepted_questions.append(generated_question)
+                    accepted_source_facts.append(generated.source_fact)
+                    accepted_in_batch += 1
+
+                except ValueError as error:
+                    last_error = error
+                    rejected_in_batch += 1
+                    print(
+                        f"LM Studio Quiz batch {batch_attempts} "
+                        f"soru {raw_index + 1} reddedildi: {error}"
+                    )
+
+        except json.JSONDecodeError as error:
             last_error = error
-
-            attempt_duration = (
-                time.perf_counter() - attempt_started_at
-            )
-
             print(
-                f"Ollama toplu quiz doğrulama hatası "
-                f"(deneme {attempt}/{max_attempts}, "
-                f"{attempt_duration:.1f} sn): {error}"
+                f"LM Studio Quiz batch {batch_attempts} "
+                f"JSON decode hatası: {error}"
             )
 
-            prompt += f"""
+        except ValueError as error:
+            last_error = error
+            print(
+                f"LM Studio Quiz batch {batch_attempts} "
+                f"reddedildi: {error}"
+            )
 
-ÖNCEKİ ÇIKTIN GEÇERSİZDİ.
+        missing_outputs = max(
+            0,
+            batch_size - min(produced_count, batch_size),
+        )
+        rejected_in_batch += missing_outputs
+        batch_duration = time.perf_counter() - batch_started_at
+        print(
+            f"LM Studio Quiz batch {batch_attempts}: "
+            f"{batch_size} istendi, "
+            f"{produced_count} üretildi, "
+            f"{accepted_in_batch} kabul edildi, "
+            f"{rejected_in_batch} reddedildi, "
+            f"süre {batch_duration:.1f} sn"
+        )
 
-Hata:
-{error}
+        retry_instruction = (
+            "- Previous batch had invalid or missing questions. Use new "
+            "facts and different question forms."
+            if accepted_in_batch < batch_size
+            else ""
+        )
 
-Çıktıyı baştan oluştur.
-TAM OLARAK {question_count} soru döndür.
-Yalnızca JSON döndür.
-"""
+    if len(accepted_questions) != question_count:
+        raise OllamaServiceError(
+            f"LM Studio {question_count} geçerli soru üretemedi. "
+            f"{len(accepted_questions)} soru kabul edildi."
+        ) from last_error
 
-    raise OllamaServiceError(
-        "Yapay zeka geçerli quiz oluşturamadı."
-    ) from last_error
-
+    result = QuizResponse(
+        questions=accepted_questions
+    )
+    result = _validate_quiz(
+        result,
+        question_count,
+    )
+    total_duration = time.perf_counter() - quiz_started_at
+    print(
+        f"LM Studio Quiz tamamlandı: "
+        f"{len(result.questions)} soru, "
+        f"{batch_attempts} LM Studio çağrısı, "
+        f"toplam {total_duration:.1f} sn"
+    )
+    return result
 
 # =========================================================
 # QUIZ TEST
