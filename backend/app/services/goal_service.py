@@ -9,7 +9,8 @@ def update_goal_progress(
     db: Session,
     user_id: int,
     goal_type: str,
-    amount: int = 1
+    amount: int = 1,
+    commit: bool = True,
 ):
     """
     Kullanıcının aktif hedeflerini günceller.
@@ -44,4 +45,5 @@ def update_goal_progress(
             goal.current_value = goal.target_value
             goal.completed = True
 
-    db.commit()
+    if commit:
+        db.commit()

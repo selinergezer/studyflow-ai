@@ -1,17 +1,22 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
-from uuid import uuid4
+
 from app.db.database import get_db
 from app.models.flashcard import Flashcard
 from app.models.course import Course
 from app.models.user import User
 from app.core.security import get_current_user
+
 from app.models.document import Document
-from app.services.ai_service import OllamaServiceError, generate_flashcards
+from app.services.ai_service import LMStudioServiceError, generate_flashcards
+
 from datetime import datetime, timedelta, timezone
+
 from app.schemas.flashcard import FlashcardReview
+
 from app.services.goal_service import update_goal_progress
+
 from typing import Optional
 
 
@@ -106,7 +111,6 @@ def get_flashcards(
             "answer": flashcard.answer,
             "course_id": flashcard.course_id,
             "document_id": flashcard.document_id,
-            "batch_id": flashcard.batch_id,
             "created_at": flashcard.created_at,
             "review_count": flashcard.review_count,
             "correct_count": flashcard.correct_count,
@@ -116,35 +120,6 @@ def get_flashcards(
         for flashcard in flashcards
     ]
 
-@router.delete("/batch/{batch_id}", status_code=204)
-def delete_flashcard_batch(
-    batch_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    flashcards = (
-        db.query(Flashcard)
-        .join(
-            Course,
-            Flashcard.course_id == Course.id
-        )
-        .filter(
-            Flashcard.batch_id == batch_id,
-            Course.user_id == current_user.id
-        )
-        .all()
-    )
-
-    if not flashcards:
-        raise HTTPException(
-            status_code=404,
-            detail="Flashcard grubu bulunamadı."
-        )
-
-    for flashcard in flashcards:
-        db.delete(flashcard)
-
-    db.commit()
 
 # =========================================================
 # FLASHCARD SİL
@@ -228,16 +203,15 @@ def generate_flashcards_endpoint(
             "message": "Flashcard sayısı 1 ile 30 arasında olmalıdır."
         }
 
-    # Ollama ile flashcard oluştur
+    # LM Studio ile flashcard oluştur
     try:
         ai_result = generate_flashcards(
             document.text,
             flashcard_count
         )
-    except OllamaServiceError as error:
+    except LMStudioServiceError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
-    batch_id = str(uuid4())
     created_flashcards = []
 
     # Oluşturulan kartları veritabanına kaydet
@@ -247,36 +221,33 @@ def generate_flashcards_endpoint(
             question=item.question,
             answer=item.answer,
             course_id=course_id,
-            document_id=document_id,
-            batch_id=batch_id
+            document_id=document_id
         )
 
         db.add(flashcard)
         db.flush()
 
         created_flashcards.append({
-    "id": flashcard.id,
-    "question": flashcard.question,
-    "answer": flashcard.answer,
-    "course_id": flashcard.course_id,
-    "document_id": flashcard.document_id,
-    "batch_id": flashcard.batch_id,
-    "review_count": flashcard.review_count,
-    "correct_count": flashcard.correct_count,
-    "wrong_count": flashcard.wrong_count,
-    "next_review": flashcard.next_review
-})
+            "id": flashcard.id,
+            "question": flashcard.question,
+            "answer": flashcard.answer,
+            "course_id": flashcard.course_id,
+            "document_id": flashcard.document_id,
+            "review_count": flashcard.review_count,
+            "correct_count": flashcard.correct_count,
+            "wrong_count": flashcard.wrong_count,
+            "next_review": flashcard.next_review
+        })
 
     db.commit()
 
     return {
-    "message": "AI tarafından flashcard'lar başarıyla oluşturuldu.",
-    "document_id": document_id,
-    "course_id": course_id,
-    "batch_id": batch_id,
-    "flashcard_count": len(created_flashcards),
-    "flashcards": created_flashcards
-}
+        "message": "AI tarafından flashcard'lar başarıyla oluşturuldu.",
+        "document_id": document_id,
+        "course_id": course_id,
+        "flashcard_count": len(created_flashcards),
+        "flashcards": created_flashcards
+    }
 
 
 # =========================================================

@@ -1,802 +1,611 @@
-from google import genai
-from google.genai import errors, types
-from pydantic import BaseModel, Field
-from typing import Literal, Optional
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextvars import ContextVar
 from difflib import SequenceMatcher
+import logging
+import threading
+import time
+from typing import Literal, Optional
+
 import httpx
 import json
 import re
-import time
-import unicodedata
-from app.core.config import settings
+from pydantic import BaseModel
 
 
 # =========================================================
-# GEMINI CLIENT
+# LOCAL AI CONFIG
 # =========================================================
 
-client = genai.Client(
-    api_key=settings.GEMINI_API_KEY
+LMSTUDIO_BASE_URL = "http://host.docker.internal:1234"
+
+# Özetleme için kullandığımız model
+LMSTUDIO_SUMMARY_MODEL = "gemma-3-12b-it-qat"
+
+
+# Quiz için kullandığımız model
+
+LMSTUDIO_QUIZ_MODEL = "qwen3-8b"
+
+logger = logging.getLogger("uvicorn.error.studyflow.quiz")
+_quiz_validation_rejection_reason: ContextVar[Optional[str]] = ContextVar(
+    "quiz_validation_rejection_reason",
+    default=None,
 )
 
+# =========================================================
+# ERRORS
+# =========================================================
+
+class LMStudioServiceError(RuntimeError):
+    """LM Studio servisinden kontrollü olarak dönen hata."""
+    pass
+
 
 # =========================================================
-# OLLAMA CLIENT
+# LM STUDIO CLIENT
 # =========================================================
 
-class OllamaServiceError(RuntimeError):
-    """Yerel yapay zeka servisinden kontrollü olarak dönen hata."""
-
-
-def _generate_with_ollama(
+def _generate_with_lmstudio(
     prompt: str,
     *,
     json_response: bool = False,
     json_schema: Optional[dict] = None,
-    num_predict: int = 450,
+    num_predict: int = 1800,
+    model: Optional[str] = None,
 ) -> str:
+    selected_model = model or LMSTUDIO_SUMMARY_MODEL
+
     payload = {
-        "model": settings.OLLAMA_MODEL,
-        "prompt": prompt,
+        "model": selected_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "temperature": 0.1,
+        "max_tokens": num_predict,
         "stream": False,
-        "keep_alive": "10m",
-        "options": {
-            "temperature": 0.1,
-            "num_predict": num_predict,
-        },
     }
 
     if json_schema is not None:
-        payload["format"] = json_schema
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "structured_response",
+                "schema": json_schema,
+            },
+        }
+
     elif json_response:
-        payload["format"] = "json"
+        payload["response_format"] = {
+            "type": "json_object",
+        }
 
     try:
         response = httpx.post(
-            f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/generate",
+            f"{LMSTUDIO_BASE_URL}/v1/chat/completions",
             json=payload,
-            timeout=120.0,
+            timeout=300.0,
         )
+
         response.raise_for_status()
+
         data = response.json()
-    except (httpx.RequestError, httpx.HTTPStatusError) as error:
-        raise OllamaServiceError(
-            "Yerel yapay zeka servisine ulaşılamıyor."
+
+    except httpx.HTTPStatusError as error:
+
+        print(
+            "LM Studio HTTP hatası:",
+            error.response.status_code,
+            error.response.text,
+        )
+
+        raise LMStudioServiceError(
+            "LM Studio geçerli bir yanıt döndürmedi."
         ) from error
+
+    except httpx.RequestError as error:
+
+        print(
+            "LM Studio bağlantı hatası:",
+            repr(error),
+        )
+
+        raise LMStudioServiceError(
+            "LM Studio servisine ulaşılamıyor."
+        ) from error
+
     except (json.JSONDecodeError, ValueError) as error:
-        raise OllamaServiceError(
-            "Yapay zeka geçerli bir yanıt oluşturamadı."
+
+        raise LMStudioServiceError(
+            "LM Studio yanıtı okunamadı."
         ) from error
 
-    generated_text = data.get("response")
+    generated_text = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content")
+    )
 
-    if not isinstance(generated_text, str) or not generated_text.strip():
-        raise OllamaServiceError(
-            "Yapay zeka geçerli bir yanıt oluşturamadı."
+    if (
+        not isinstance(generated_text, str)
+        or not generated_text.strip()
+    ):
+        raise LMStudioServiceError(
+            "LM Studio boş yanıt oluşturdu."
         )
 
     return generated_text.strip()
 
 
+def _generate_with_lmstudio_stream(
+    prompt: str,
+    *,
+    num_predict: int = 850,
+):
+    payload = {
+        "model": LMSTUDIO_SUMMARY_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        "temperature": 0.1,
+        "max_tokens": num_predict,
+        "stream": True,
+    }
+
+    try:
+        with httpx.stream(
+            "POST",
+            f"{LMSTUDIO_BASE_URL}/v1/chat/completions",
+            json=payload,
+            timeout=httpx.Timeout(300.0, connect=30.0),
+        ) as response:
+            if response.is_error:
+                response.read()
+
+            response.raise_for_status()
+
+            for line in response.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+
+                event_data = line.removeprefix("data:").strip()
+
+                if event_data == "[DONE]":
+                    return
+
+                if not event_data:
+                    continue
+
+                try:
+                    data = json.loads(event_data)
+                except json.JSONDecodeError as error:
+                    raise LMStudioServiceError(
+                        "LM Studio streaming yanıtı okunamadı."
+                    ) from error
+
+                choice = data.get("choices", [{}])[0]
+                delta = choice.get("delta") or {}
+                message = choice.get("message") or {}
+                content = (
+                    delta.get("content")
+                    or message.get("content")
+                )
+
+                if isinstance(content, str) and content:
+                    yield content
+
+    except httpx.HTTPStatusError as error:
+        print(
+            "LM Studio streaming HTTP hatası:",
+            error.response.status_code,
+            error.response.text,
+        )
+        raise LMStudioServiceError(
+            "LM Studio geçerli bir streaming yanıtı döndürmedi."
+        ) from error
+
+    except httpx.RequestError as error:
+        print(
+            "LM Studio streaming bağlantı hatası:",
+            repr(error),
+        )
+        raise LMStudioServiceError(
+            "LM Studio streaming servisine ulaşılamıyor."
+        ) from error
+
+
 # =========================================================
-# QUIZ RESPONSE MODELLERİ
+# JSON CLEANER
+# =========================================================
+
+def _clean_json_response(raw_response: str) -> str:
+
+    cleaned = raw_response.strip()
+
+    if cleaned.startswith("```"):
+        cleaned = re.sub(
+            r"^```(?:json)?\s*",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+
+        cleaned = re.sub(
+            r"\s*```$",
+            "",
+            cleaned,
+        )
+
+    cleaned = cleaned.strip()
+
+    try:
+        _, json_end = json.JSONDecoder().raw_decode(cleaned)
+        return cleaned[:json_end].strip()
+
+    except json.JSONDecodeError:
+        return cleaned
+
+
+# =========================================================
+# PDF SUMMARY
+# =========================================================
+
+def generate_summary(text: str) -> str:
+    """
+    Kısa metinler için doğrudan özet üretir.
+
+    Uzun PDF'lerde asıl özetleme akışı
+    document_topic_service.py tarafından yapılacaktır.
+    """
+
+    if not text or not text.strip():
+        raise ValueError("Özetlenecek metin boş.")
+
+    prompt = f"""
+Sen StudyFlow uygulamasının akademik özetleme asistanısın.
+
+Aşağıdaki ders içeriğini yalnızca verilen bilgilerden yararlanarak
+Türkçe ve anlaşılır biçimde özetle.
+
+Kurallar:
+- Kaynakta bulunmayan bilgi ekleme.
+- Önemli kavramları atlama.
+- Tanımları koru.
+- Teknik terimleri koru.
+- Gereksiz tekrarları kaldır.
+- Öğrencinin ders çalışabileceği şekilde yaz.
+- Doğal Türkçe kullan.
+
+DERS İÇERİĞİ:
+
+{text}
+"""
+
+    return _generate_with_lmstudio(
+        prompt,
+        num_predict=1800,
+    )
+
+
+# =========================================================
+# GEÇİCİ OLARAK DEVRE DIŞI AI ÖZELLİKLERİ
 # =========================================================
 
 class QuizQuestion(BaseModel):
-    question_type: Literal["multiple_choice"]
+    question_type: Literal["multiple_choice"] = "multiple_choice"
+    context_text: Optional[str] = None
     question_text: str
-
     option_a: str
     option_b: str
     option_c: str
     option_d: str
     option_e: str
-
     correct_answer: Literal["A", "B", "C", "D", "E"]
     explanation: str
-
-
-class OllamaQuizQuestion(BaseModel):
-    source_fact: str = Field(min_length=1, max_length=500)
-    question_text: str
-    options: list[str] = Field(min_length=5, max_length=5)
-    correct_answer: Literal["A", "B", "C", "D", "E"]
 
 
 class QuizResponse(BaseModel):
     questions: list[QuizQuestion]
 
 
-# =========================================================
-# PDF ÖZETLEME
-# =========================================================
-
-def generate_summary(text: str):
-
-    prompt = f"""
-Aşağıdaki ders notunu Türkçe özetle.
-
-Kurallar:
-
-- En fazla 250 kelime.
-- Madde madde yaz.
-- Önemli kavramları belirt.
-
-Ders Notu:
-
-{text[:15000]}
-"""
-
-    return _generate_with_ollama(prompt)
-
-
-# =========================================================
-# AI QUIZ OLUŞTURMA
-# =========================================================
-
-_SUBQUESTION_NUMBERING = re.compile(
-    r"(?:^|[\n;]|\s)\d+[.)]\s+",
-    re.MULTILINE,
-)
-_EMBEDDED_OPTION = re.compile(
-    r"(?:^|\s)[A-E][.)]\s+",
-    re.MULTILINE,
-)
-_SUBQUESTION_LETTERING = re.compile(
-    r"(?:^|[\n;]|\s)[a-e][.)]\s+",
-    re.IGNORECASE | re.MULTILINE,
-)
-_OPTION_PREFIX = re.compile(
-    r"^\s*[A-E]\s*(?:[.)]|[-–—:])\s*",
-    re.IGNORECASE,
-)
-_OPEN_ENDED_TASK = re.compile(
-    r"\b(?:çiziniz|çizin|açıklayınız|açıklayın|yorumlayınız|yorumlayın|"
-    r"ispatlayınız|ispatlayın|gösteriniz|gösterin)\b"
-)
-_TASK_VERB = re.compile(
-    r"\b(?:hesaplayınız|hesaplayın|bulunuz|bulun|bulup|belirleyiniz|"
-    r"belirleyin|çiziniz|çizin|açıklayınız|açıklayın|yorumlayınız|"
-    r"yorumlayın)\b"
-)
-_BROKEN_OCR_SUFFIX = re.compile(
-    r"\b[bcçdfgğhjklmnprsştvyz]\s+(?:dır|dir|dur|dür|tır|tir|tur|tür)\b",
-    re.IGNORECASE,
-)
-_VAGUE_QUESTION_STEM = re.compile(
-    r"\b(?:karşılıklarını\s+seç(?:in|iniz)|hangisini\s+seç(?:in|iniz))\b",
-    re.IGNORECASE,
-)
-_GENERIC_OPTION_VALUES = {
-    "doğru",
-    "yanlış",
-    "evet",
-    "hayır",
-    "bilinmiyor",
-    "belirsiz",
-    "başka bir",
-    "hiçbiri",
+_QUIZ_CHUNK_CHARS = 2400
+_QUIZ_FALLBACK_CHUNK_CHARS = 1400
+_QUIZ_MAX_FILL_ROUNDS = 3
+_QUIZ_PREVIOUS_PROMPT_LIMIT = 12
+_QUIZ_STREAM_BATCH_SIZE = 2
+_QUIZ_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "for", "from", "in", "is", "of",
+    "or", "that", "the", "this", "to", "with",
+    "ama", "bir", "bu", "da", "de", "gibi", "için", "ile", "ise",
+    "olan", "olarak", "ve", "veya",
 }
-_OPTION_SYNONYMS = {
-    "diskret": "kesikli",
-    "devamlı": "sürekli",
-    "evet": "doğru",
-    "hayır": "yanlış",
-    "kontinuum": "sürekli",
-    "kontinüum": "sürekli",
-    "kontinüüm": "sürekli",
+_BANNED_QUIZ_OPTIONS = {
+    "all", "all of the above", "none", "none of the above",
+    "hepsi", "hepsi doğru", "hiçbiri", "yukarıdakilerin hepsi",
 }
-_OPTION_PHRASE_SYNONYMS = {
-    "ya da": "veya",
-}
-_RANGE_QUESTION = re.compile(
-    r"\b(?:hangi\s+değerleri\s+alır|hangi\s+aralıkta)\b",
+_META_SOURCE_REFERENCE = re.compile(
+    r"\b(?:metne\s+göre|metinde(?:\s+(?:belirtildiği\s+gibi|"
+    r"ifade\s+edilmiştir|yer\s+almaktadır))?|belgeye\s+göre|belgede|"
+    r"kaynağa\s+göre|kaynakta|yukarıdaki\s+metne\s+göre|bu\s+metinde|"
+    r"bu\s+belgede|verilen\s+metinde|source\s+text['’]?e\s+göre)\b",
     re.IGNORECASE,
 )
-_SINGLE_NUMBER_OPTION = re.compile(
-    r"^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)\s*%?$"
+_META_SOURCE_REPAIR_PATTERNS = (
+    re.compile(
+        r"^\s*(?:(?:metinde|kaynakta|belgede|bu\s+belgede)\s+"
+        r"(?:belirtilmiştir|ifade\s+edilir|ifade\s+edilmiştir)\s*(?:ki)?|"
+        r"metinde\s+(?:belirtildiği|ifade\s+edildiği)\s+gibi|"
+        r"kaynakta\s+(?:belirtildiği|ifade\s+edildiği)\s+gibi|"
+        r"metne\s+göre|yukarıdaki\s+metne\s+göre|"
+        r"verilen\s+metinde|bu\s+belgede|belgede)"
+        r"\s*[,;:\-–—]?\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:kaynakta|metinde|belgede|bu\s+belgede)\s+"
+        r"(?:belirtilen|ifade\s+edilen)\s+",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:metne\s+göre|yukarıdaki\s+metne\s+göre|"
+        r"verilen\s+metinde|bu\s+belgede|kaynakta|belgede|metinde)\b"
+        r"\s*[,;:\-–—]?\s*",
+        re.IGNORECASE,
+    ),
 )
-_CONTEXT_DEPENDENT_REFERENCE = re.compile(
-    r"\b(?:yukarıdaki\s+bilgileri|aşağıdaki\s+soruları|şekle\s+göre|"
-    r"tabloya\s+göre)\b",
+_REFERENCE_HEADING = re.compile(
+    r"^\s*(?:#{1,6}\s*|\d+[.)]\s*)?"
+    r"(?:kaynakça|kaynaklar|references|bibliography|further\s+reading)"
+    r"\s*[:\-–—]?\s*$",
     re.IGNORECASE,
 )
-def _normalized_question_text(question_text: str) -> str:
+_REFERENCE_LINE = re.compile(
+    r"(?:https?://|www\.|\bdoi\s*:|\barxiv\s*:)",
+    re.IGNORECASE,
+)
+_ACADEMIC_REFERENCE_LINE = re.compile(
+    r"(?:\bet\s+al\.|\bvd\.|"
+    r"(?:&|,\s*[A-ZÇĞİÖŞÜ]\.)[^\n]{0,120}\(\s*(?:19|20)\d{2}[a-z]?\s*\)|"
+    r"^[A-ZÇĞİÖŞÜ][^,]{2,40},\s+[A-ZÇĞİÖŞÜ][^\d]{2,60}"
+    r"\b(?:19|20)\d{2}\b)",
+    re.IGNORECASE,
+)
+_QUIZ_RELATION_MARKERS = {
+    "amaç", "avant", "etki", "fark", "işlev", "neden", "özellik",
+    "sonuç", "süreç", "uygula", "yarar",
+}
+_QUIZ_CONCEPT_ALIASES = {
+    "bilme": "knowledge_visibility",
+    "görem": "knowledge_visibility",
+    "haberd": "knowledge_visibility",
+    "konum": "data_location",
+    "nerede": "data_location",
+    "saklan": "data_location",
+    "tutul": "data_location",
+    "şeffaf": "transparency",
+    "kontro": "control",
+    "hakimi": "control",
+    "mahrem": "privacy",
+    "gizlil": "privacy",
+    "ülke": "cross_border",
+    "türkiy": "cross_border",
+    "avrupa": "cross_border",
+    "işlen": "data_processing",
+    "hukuk": "applicable_law",
+    "mevzua": "applicable_law",
+    "yasa": "applicable_law",
+}
+_SIMPLE_ANTONYM_PAIRS = (
+    ("mümkün", "imkansız"),
+    ("artar", "azalır"),
+    ("artmıştır", "azalmıştır"),
+    ("artırır", "azaltır"),
+    ("kazanmıştır", "kaybetmiştir"),
+    ("sağlar", "engeller"),
+    ("vardır", "yoktur"),
+)
+_UNNATURAL_QUESTION_PATTERNS = (
+    re.compile(r"\bneden\s+.+\s+(?:olduğu|geldiği)\s+nedir\b", re.IGNORECASE),
+    re.compile(r"\b(?:nedeni|sebebi)\s+nedir\s+(?:diye|olarak)\b", re.IGNORECASE),
+)
+_ASSERTIVE_PREMISE_MARKERS = re.compile(
+    r"\b(?:için|nedeniyle|sebebiyle|dolayı|olduğundan|sayesinde|sonucunda)\b",
+    re.IGNORECASE,
+)
+_CATEGORY_QUESTION_PATTERN = re.compile(
+    r"\bhangi\s+(?:etik\s+)?(?:ilke|kavram|problem|sorun)\w*",
+    re.IGNORECASE,
+)
+_CATEGORY_OPTION_ACTION_PATTERN = re.compile(
+    r"\b\w+(?:ması|mesi|abilmesi|ebilmesi)\b",
+    re.IGNORECASE,
+)
+_QUESTION_ANSWER_OPPOSITIONS = (
+    (
+        re.compile(r"\bgör(?:ür|dü|dük|en|mektedir)\w*", re.IGNORECASE),
+        re.compile(r"\bgörm(?:ez|edi|eyen|em|üyor)\w*", re.IGNORECASE),
+    ),
+    (
+        re.compile(r"\b(?:artar|artırır|yükselir)\w*", re.IGNORECASE),
+        re.compile(r"\b(?:azalır|azaltır|düşer)\w*", re.IGNORECASE),
+    ),
+    (
+        re.compile(r"\b(?:vardır|mevcuttur|bulunur)\w*", re.IGNORECASE),
+        re.compile(r"\b(?:yoktur|bulunmaz)\w*", re.IGNORECASE),
+    ),
+    (
+        re.compile(r"\b(?:zorundadır|gereklidir)\w*", re.IGNORECASE),
+        re.compile(r"\b(?:zorunda\s+değildir|gerekmez)\w*", re.IGNORECASE),
+    ),
+)
+
+
+def _normalize_quiz_text(value: str) -> str:
     return " ".join(
-        re.sub(r"[^\w\s]", " ", question_text.casefold()).split()
+        re.sub(r"[^\w\s]", " ", value.casefold()).split()
     )
-
-
-def _canonical_option(option: str) -> str:
-    normalized_option = _normalized_question_text(option)
-
-    for phrase, replacement in _OPTION_PHRASE_SYNONYMS.items():
-        normalized_option = re.sub(
-            rf"\b{re.escape(phrase)}\b",
-            replacement,
-            normalized_option,
-        )
-
-    tokens = normalized_option.split()
-    canonical_tokens = [_OPTION_SYNONYMS.get(token, token) for token in tokens]
-    return " ".join(canonical_tokens)
 
 
 def _prepare_quiz_source(text: str) -> str:
-    cleaned_lines = []
+    content_lines = []
 
     for raw_line in text.splitlines():
         line = " ".join(raw_line.split()).strip()
 
-        if not line:
-            continue
-
-        if any(unicodedata.category(character) == "Co" for character in line):
-            continue
-
-        if line.endswith("="):
-            continue
-
-        if _CONTEXT_DEPENDENT_REFERENCE.search(line):
-            continue
-
-        compact_line = "".join(line.split())
-        alphanumeric_count = sum(character.isalnum() for character in compact_line)
-        symbol_count = sum(
-            not character.isalnum() for character in compact_line
-        )
-        natural_words = re.findall(r"[^\W\d_]{2,}", line)
-
-        if (
-            len(compact_line) >= 8
-            and symbol_count > alphanumeric_count * 1.5
-            and len(natural_words) < 2
-        ):
-            continue
-
-        if (
-            len(compact_line) < 12
-            and len(natural_words) < 2
-            and not re.search(r"=\s*\S+", line)
-            and not re.search(r"\w\s*[=≤≥+\-/]\s*\w", line)
-        ):
-            continue
-
-        cleaned_lines.append(line)
-
-    cleaned_text = "\n".join(cleaned_lines).strip()
-
-    if cleaned_text:
-        return cleaned_text
-
-    fallback_lines = []
-
-    for raw_line in text.splitlines():
-        line = " ".join(raw_line.split()).strip()
-        alpha_count = sum(character.isalpha() for character in line)
-
-        if (
-            line
-            and alpha_count >= 10
-            and not line.endswith("=")
-            and not _CONTEXT_DEPENDENT_REFERENCE.search(line)
-            and not any(
-                unicodedata.category(character) == "Co"
-                for character in line
-            )
-        ):
-            fallback_lines.append(line)
-
-    return "\n".join(fallback_lines).strip()
-
-
-def _validate_ollama_source_fact(generated: OllamaQuizQuestion) -> None:
-    source_fact = generated.source_fact.strip()
-
-    if not source_fact:
-        raise ValueError("source_fact boş.")
-
-    if len(source_fact) > 500:
-        raise ValueError("source_fact çok uzun.")
-
-
-def _looks_like_information_block(question_text: str) -> bool:
-    nonempty_lines = [
-        line for line in question_text.splitlines() if line.strip()
-    ]
-    probability_results = re.findall(
-        r"olasılığ[ıi]\s*=",
-        question_text.casefold(),
-    )
-    list_markers = re.findall(
-        r"(?:^|\n)\s*(?:[-•*]|\d+[.)]|[a-e][.)])\s+",
-        question_text,
-        re.IGNORECASE,
-    )
-
-    return (
-        len(nonempty_lines) >= 5
-        or question_text.count("=") >= 3
-        or len(probability_results) >= 2
-        or len(list_markers) >= 3
-        or (
-            len(question_text) > 600
-            and len(re.findall(r"[.!?]", question_text)) >= 4
-        )
-    )
-
-
-def _is_obviously_broken_question(question_text: str) -> bool:
-    compact_text = "".join(question_text.split())
-    meaningful_char_count = sum(
-        character.isalnum() for character in compact_text
-    )
-
-    if (
-        "�" in question_text
-        or meaningful_char_count == 0
-        or _BROKEN_OCR_SUFFIX.search(question_text)
-    ):
-        return True
-
-    if len(compact_text) < 10 and meaningful_char_count < 3:
-        return True
-
-    if (
-        len(compact_text) >= 8
-        and meaningful_char_count / len(compact_text) < 0.2
-    ):
-        return True
-
-    natural_words = re.findall(r"[^\W\d_]{2,}", question_text)
-    formula_symbols = sum(
-        not character.isalnum() and not character.isspace()
-        for character in question_text
-    )
-    question_cues = ("nedir", "kaçtır", "hangisi", "seçiniz", "seçin")
-
-    return (
-        len(natural_words) <= 1
-        and formula_symbols >= 3
-        and not any(cue in question_text.casefold() for cue in question_cues)
-    )
-
-
-def _select_fallback_context(context: str, max_chars: int = 4000) -> str:
-    chunks = [
-        chunk.strip()
-        for chunk in re.split(r"\n\s*\n|(?<=[.!?])\s+", context)
-        if chunk.strip()
-    ]
-    preferred_markers = (
-        "tanım",
-        "kavram",
-        "temel",
-        "kural",
-        "ifade eder",
-        "olarak adlandırılır",
-        "denir",
-        "özelli",
-    )
-    unsuitable_markers = (
-        "alıştırma",
-        "grafiğini çiz",
-        "grafik çiz",
-        "hesaplayınız",
-        "hesaplayın",
-        "örnek çözüm",
-        "çözüm:",
-        "tablo",
-    )
-    suitable_chunks = []
-
-    for position, chunk in enumerate(chunks):
-        normalized_chunk = chunk.casefold()
-
-        if (
-            _SUBQUESTION_NUMBERING.search(chunk)
-            or _SUBQUESTION_LETTERING.search(chunk)
-            or _OPEN_ENDED_TASK.search(normalized_chunk)
-            or len(_TASK_VERB.findall(normalized_chunk)) >= 2
-            or re.match(r"^örnek\s*:", normalized_chunk)
-            or any(marker in normalized_chunk for marker in unsuitable_markers)
-        ):
-            continue
-
-        priority = 0 if any(
-            marker in normalized_chunk for marker in preferred_markers
-        ) else 1
-        suitable_chunks.append((priority, position, chunk))
-
-    suitable_chunks.sort(key=lambda item: (item[0], item[1]))
-    selected_chunks = []
-    selected_length = 0
-
-    for _, _, chunk in suitable_chunks:
-        remaining_chars = max_chars - selected_length
-
-        if remaining_chars <= 0:
+        if _REFERENCE_HEADING.match(line):
             break
 
-        selected_chunk = chunk[:remaining_chars]
-        selected_chunks.append(selected_chunk)
-        selected_length += len(selected_chunk) + 1
+        if (
+            not line
+            or _REFERENCE_LINE.search(line)
+            or _ACADEMIC_REFERENCE_LINE.search(line)
+        ):
+            continue
 
-    fallback_context = "\n".join(selected_chunks).strip()
-    return fallback_context or context[:max_chars]
+        content_lines.append(line)
+
+    return "\n".join(content_lines).strip()
 
 
-def _select_alternate_context(
-    text: str,
-    avoided_context_starts: list[int],
-    max_chars: int = 4000,
-) -> str:
-    if len(text) <= max_chars:
-        return _select_fallback_context(text, max_chars)
+def _split_quiz_source(text: str) -> list[str]:
+    cleaned_text = _prepare_quiz_source(text)
 
-    last_start = len(text) - max_chars
-    candidate_starts = list(range(0, last_start + 1, max_chars))
+    if not cleaned_text:
+        return []
 
-    if candidate_starts[-1] != last_start:
-        candidate_starts.append(last_start)
+    chunks = []
+    remaining = cleaned_text
 
-    def distance_from_used_contexts(candidate_start: int) -> int:
-        if not avoided_context_starts:
-            return last_start
-
-        return min(
-            abs(candidate_start - used_start)
-            for used_start in avoided_context_starts
+    while len(remaining) > _QUIZ_CHUNK_CHARS:
+        boundary_start = int(_QUIZ_CHUNK_CHARS * 0.75)
+        boundary = max(
+            remaining.rfind(marker, boundary_start, _QUIZ_CHUNK_CHARS)
+            for marker in (". ", "! ", "? ", "\n")
         )
 
-    alternate_start = max(
-        candidate_starts,
-        key=distance_from_used_contexts,
-    )
-    alternate_window = text[
-        alternate_start:alternate_start + max_chars
-    ]
-    return _select_fallback_context(alternate_window, max_chars)
+        if boundary < boundary_start:
+            boundary = remaining.rfind(" ", boundary_start, _QUIZ_CHUNK_CHARS)
+
+        if boundary < boundary_start:
+            boundary = _QUIZ_CHUNK_CHARS
+        elif remaining[boundary:boundary + 2] in {". ", "! ", "? "}:
+            boundary += 1
+
+        chunks.append(remaining[:boundary].strip())
+        remaining = remaining[boundary:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+
+    return chunks
 
 
-def _quiz_retry_instruction(error: ValueError) -> str:
-    if isinstance(error, json.JSONDecodeError):
-        return (
-            "Önceki yanıt geçersiz JSON'du. Bu kez yalnızca kısa ve "
-            "eksiksiz JSON döndür."
-        )
-
-    error_message = str(error).casefold()
-
-    if "source_fact" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: source_fact boş veya fazla uzundu.\n"
-            "Contextten kısa ve açık bir source_fact seç."
-        )
-
-    if "birden fazla alt soru" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Birden fazla alt soru ürettin.\n"
-            "Bu kez question_text içinde TAM OLARAK TEK soru yaz. "
-            "1., 2., 3. gibi alt maddeler kullanma."
-        )
-
-    if "açık uçlu veya birden fazla görev" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Açık uçlu veya çok görevli soru yazdın.\n"
-            "Bu kez çizme/açıklama istemeyen, tek cevaplı bir multiple-choice "
-            "soru yaz."
-        )
-
-    if "anlamsız veya eksik" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Soru metni bozuk veya eksikti.\n"
-            "OCR parçasını kopyalama; kavramı düzgün ve tam bir Türkçe soruya dönüştür."
-        )
-
-    if "belirsiz" in error_message and "soru kökü" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Soru kökü neyin sorulduğunu açıklamıyordu.\n"
-            "Bu kez tek bir açık bilgiyi soran, bağımsız ve kesin bir soru yaz."
-        )
-
-    if "doğru-yanlış kılığı" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Doğru-yanlış sorusunu 5 şıklı gösterdin.\n"
-            "Gerçek bir multiple-choice soru ve kavramsal seçenekler üret."
-        )
-
-    if "bilgi bloğu" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Soru yerine uzun bir bilgi bloğu yazdın.\n"
-            "Bu kez tek kavramı soran kısa bir question_text üret."
-        )
-
-    if "anlamsal olarak tekrarlanan" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Seçenekler eş anlamlı kavramlar içeriyordu.\n"
-            "Bu kez anlamca farklı 5 seçenek üret ve yalnızca birini doğru yap."
-        )
-
-    if "aralık sorusu" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Aralık sorusuna tekil sayı seçenekleri verdin.\n"
-            "Aralık seçenekleri üret veya daha basit bir kavram sor."
-        )
-
-    if "seçenek etiketi içeriyor" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: options içinde A), B) gibi etiket kullandın.\n"
-            "Seçenek metinlerini harf etiketi olmadan yaz."
-        )
-
-    if "tekrarlanan şık" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Seçenekler tekrar etti.\n"
-            "Bu kez options dizisindeki beş seçenek de farklı olsun."
-        )
-
-    if "correct_answer" in error_message or "doğru cevabı" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: correct_answer formatı hatalıydı.\n"
-            "correct_answer yalnızca tek harf olmalı: A, B, C, D veya E."
-        )
-
-    if "question_text içine gömülmüş" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Seçenekleri soru metnine yazdın.\n"
-            "question_text içine seçenek ekleme; seçenekleri yalnızca "
-            "options dizisine yaz."
-        )
-
-    if "gereksiz sayıda soru işareti" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Soru metninde birden fazla soru sordun.\n"
-            "Bu kez question_text içinde tek ve bağımsız bir soru sor."
-        )
-
-    if "aşırı benzer" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Soru önceki bir soruya çok benziyordu.\n"
-            "Bu kez ders notundan farklı bir kavram seç ve farklı bir soru yaz."
-        )
-
-    if "eksik veya boş şık" in error_message:
-        return (
-            "ÖNCEKİ DENEME GEÇERSİZDİ: Bir veya daha fazla seçenek boştu.\n"
-            "options dizisine tam 5 dolu seçenek yaz."
-        )
-
-    return (
-        "ÖNCEKİ DENEME GEÇERSİZDİ: Çıktı quiz kurallarına uymadı.\n"
-        "Bu kez question_text, options ve correct_answer alanlarını eksiksiz doldur."
-    )
-
-
-def _validate_quiz(
-    quiz: QuizResponse,
+def _select_quiz_chunks(
+    chunks: list[str],
     question_count: int,
-    previous_question_texts: Optional[list[str]] = None,
-):
-    """Validate Ollama quiz output before returning it to the API."""
+    previous_questions: Optional[list[object]] = None,
+) -> list[str]:
+    selected_count = min(len(chunks), question_count, 5)
 
-    if quiz is None or not quiz.questions:
-        raise ValueError("AI hiç soru oluşturmadı.")
+    if selected_count == 0:
+        return []
 
-    if len(quiz.questions) != question_count:
-        raise ValueError(
-            f"AI {question_count} soru yerine "
-            f"{len(quiz.questions)} soru oluşturdu."
-        )
+    historical_tokens = set()
+    for previous_question in previous_questions or []:
+        historical_tokens.update(_canonical_quiz_concept_tokens(
+            " ".join(_historical_question_fields(previous_question))
+        ))
 
-    for index, question in enumerate(quiz.questions, start=1):
+    if not historical_tokens:
+        if selected_count == 1:
+            return chunks[:1]
 
-        if question.question_type != "multiple_choice":
-            raise ValueError(
-                f"{index}. sorunun soru tipi geçersiz: "
-                f"{question.question_type}"
-            )
-
-        if not question.question_text.strip():
-            raise ValueError(f"{index}. sorunun soru metni boş.")
-
-        question_text = question.question_text.strip()
-
-        if _is_obviously_broken_question(question_text):
-            raise ValueError(
-                f"{index}. sorunun metni anlamsız veya eksik görünüyor."
-            )
-
-        if len(_SUBQUESTION_NUMBERING.findall(question_text)) >= 2:
-            raise ValueError(
-                f"{index}. sorunun metninde birden fazla alt soru var."
-            )
-
-        if len(_SUBQUESTION_LETTERING.findall(question_text)) >= 2:
-            raise ValueError(
-                f"{index}. sorunun metninde birden fazla alt soru var."
-            )
-
-        if len(_EMBEDDED_OPTION.findall(question_text)) >= 3:
-            raise ValueError(
-                f"{index}. sorunun seçenekleri question_text içine gömülmüş."
-            )
-
-        if _VAGUE_QUESTION_STEM.search(question_text):
-            raise ValueError(
-                f"{index}. sorunun soru kökü belirsiz; neyin sorulduğu açık değil."
-            )
-
-        if _looks_like_information_block(question_text):
-            raise ValueError(
-                f"{index}. sorunun metni soru yerine çok maddeli bir bilgi bloğu içeriyor."
-            )
-
-        question_mark_count = question_text.count("?") + question_text.count("؟")
-
-        if question_mark_count > 2:
-            raise ValueError(
-                f"{index}. sorunun metninde gereksiz sayıda soru işareti var."
-            )
-
-        normalized_for_tasks = question_text.casefold()
-
-        if (
-            _OPEN_ENDED_TASK.search(normalized_for_tasks)
-            or len(_TASK_VERB.findall(normalized_for_tasks)) >= 2
-        ):
-            raise ValueError(
-                f"{index}. soru açık uçlu veya birden fazla görev içeriyor."
-            )
-
-        normalized_question = _normalized_question_text(question_text)
-        comparison_texts = list(previous_question_texts or [])
-        comparison_texts.extend(
-            item.question_text for item in quiz.questions[:index - 1]
-        )
-
-        for previous_text in comparison_texts:
-            normalized_previous = _normalized_question_text(previous_text)
-            similarity = SequenceMatcher(
-                None,
-                normalized_question,
-                normalized_previous,
-            ).ratio()
-
-            if normalized_question == normalized_previous or similarity >= 0.9:
-                raise ValueError(
-                    f"{index}. soru önceki bir soruyla aşırı benzer."
-                )
-
-        if not question.correct_answer.strip():
-            raise ValueError(f"{index}. sorunun doğru cevabı boş.")
-
-        if not question.explanation.strip():
-            raise ValueError(f"{index}. sorunun açıklaması boş.")
-
-        options = [
-            question.option_a,
-            question.option_b,
-            question.option_c,
-            question.option_d,
-            question.option_e,
+        indexes = [
+            round((len(chunks) - 1) * index / (selected_count - 1))
+            for index in range(selected_count)
         ]
+        return [chunks[index] for index in indexes]
 
-        if any(option is None or not option.strip() for option in options):
-            raise ValueError(
-                f"{index}. multiple choice sorusunda eksik veya boş şık var."
-            )
-
-        if any(_OPTION_PREFIX.match(option) for option in options):
-            raise ValueError(
-                f"{index}. multiple choice seçeneği A), B) gibi seçenek etiketi içeriyor."
-            )
-
-        normalized_options = [option.strip().casefold() for option in options]
-
-        if len(set(normalized_options)) != 5:
-            raise ValueError(
-                f"{index}. multiple choice sorusunda tekrarlanan şık var."
-            )
-
-        canonical_options = [_canonical_option(option) for option in options]
-
-        if len(set(canonical_options)) != 5:
-            raise ValueError(
-                f"{index}. soruda anlamsal olarak tekrarlanan seçenek var."
-            )
-
-        single_number_option_count = sum(
-            _SINGLE_NUMBER_OPTION.fullmatch(option.strip()) is not None
-            for option in options
-        )
-
-        if (
-            _RANGE_QUESTION.search(question_text)
-            and single_number_option_count >= 4
-        ):
-            raise ValueError(
-                f"{index}. aralık sorusu yalnızca tekil sayısal seçenekler içeriyor."
-            )
-
-        generic_option_count = sum(
-            _normalized_question_text(option) in _GENERIC_OPTION_VALUES
-            for option in options
-        )
-
-        if generic_option_count >= 3:
-            raise ValueError(
-                f"{index}. soru doğru-yanlış kılığına sokulmuş veya "
-                "yapay dolgu seçenekleri içeriyor."
-            )
-
-        question.correct_answer = question.correct_answer.strip().upper()
-
-        if question.correct_answer not in {"A", "B", "C", "D", "E"}:
-            raise ValueError(
-                f"{index}. multiple choice sorusunun doğru cevabı "
-                "A, B, C, D veya E olmalı."
-            )
-
-    return quiz
-
-
-def _to_quiz_question(generated: OllamaQuizQuestion) -> QuizQuestion:
-    normalized_options = [
-        _OPTION_PREFIX.sub("", option, count=1).strip()
-        for option in generated.options
-    ]
-
-    return QuizQuestion(
-        question_type="multiple_choice",
-        question_text=generated.question_text,
-        option_a=normalized_options[0],
-        option_b=normalized_options[1],
-        option_c=normalized_options[2],
-        option_d=normalized_options[3],
-        option_e=normalized_options[4],
-        correct_answer=generated.correct_answer,
-        explanation=f"Doğru cevap: {generated.correct_answer}",
+    usage_key = lambda chunk: (
+        _concept_overlap(
+            _canonical_quiz_concept_tokens(chunk),
+            historical_tokens,
+        ),
+        -len(chunk),
     )
 
+    if selected_count == 1:
+        return [min(chunks, key=usage_key)]
 
-def generate_quiz(
-    text: str,
-    question_count: int = 10
-):
-    quiz_source = _prepare_quiz_source(text)
-    quiz_started_at = time.perf_counter()
+    selected_chunks = []
+    for section_index in range(selected_count):
+        section_start = len(chunks) * section_index // selected_count
+        section_end = len(chunks) * (section_index + 1) // selected_count
+        section = chunks[section_start:max(section_end, section_start + 1)]
 
-    max_context_chars = 18000
+        selected_chunks.append(min(section, key=usage_key))
 
-    if len(quiz_source) <= max_context_chars:
-        context = quiz_source
-    else:
-        chunk_size = max_context_chars // 3
+    return sorted(selected_chunks, key=usage_key)
 
-        start_chunk = quiz_source[:chunk_size]
 
-        middle_start = max(
-            0,
-            (len(quiz_source) // 2) - (chunk_size // 2)
-        )
-        middle_chunk = quiz_source[
-            middle_start:middle_start + chunk_size
-        ]
+def _distribute_quiz_questions(
+    question_count: int,
+    chunk_count: int,
+) -> list[int]:
+    base_count, remainder = divmod(question_count, chunk_count)
+    return [
+        base_count + (1 if index < remainder else 0)
+        for index in range(chunk_count)
+    ]
 
-        end_chunk = quiz_source[-chunk_size:]
 
-        context = (
-            start_chunk
-            + "\n\n--- KAYNAĞIN ORTA BÖLÜMÜ ---\n\n"
-            + middle_chunk
-            + "\n\n--- KAYNAĞIN SON BÖLÜMÜ ---\n\n"
-            + end_chunk
-        )
+def _detect_quiz_language(text: str) -> str:
+    words = re.findall(r"[^\W\d_]+", text.casefold())
+    turkish_markers = {
+        "bir", "bu", "daha", "göre", "için", "ile", "olarak", "ve",
+    }
+    english_markers = {
+        "and", "are", "for", "from", "is", "of", "that", "the", "to",
+    }
+    turkish_score = sum(word in turkish_markers for word in words)
+    turkish_score += sum(character in "çğıöşü" for character in text.casefold())
+    english_score = sum(word in english_markers for word in words)
+    return "English" if english_score > turkish_score else "Turkish"
 
-    question_schema = OllamaQuizQuestion.model_json_schema()
 
-    batch_schema = {
+def _quiz_json_schema(question_count: int) -> dict:
+    question_schema = {
+        "type": "object",
+        "properties": {
+            "question_type": {"type": "string"},
+            "context_text": {
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "null"},
+                ],
+            },
+            "question_text": {"type": "string"},
+            "option_a": {"type": "string"},
+            "option_b": {"type": "string"},
+            "option_c": {"type": "string"},
+            "option_d": {"type": "string"},
+            "option_e": {"type": "string"},
+            "correct_answer": {"type": "string"},
+            "explanation": {"type": "string"},
+        },
+        "required": [
+            "question_type", "context_text", "question_text", "option_a",
+            "option_b", "option_c", "option_d", "option_e",
+            "correct_answer", "explanation",
+        ],
+        "additionalProperties": False,
+    }
+    return {
         "type": "object",
         "properties": {
             "questions": {
@@ -804,1027 +613,1643 @@ def generate_quiz(
                 "minItems": question_count,
                 "maxItems": question_count,
                 "items": question_schema,
-            }
+            },
         },
         "required": ["questions"],
         "additionalProperties": False,
     }
 
-    prompt = f"""
-Aşağıdaki ders notuna dayanarak TAM OLARAK {question_count} adet
-çoktan seçmeli sınav sorusu oluştur.
 
-KURALLAR:
-
-- TAM OLARAK {question_count} soru üret.
-- Bütün sorular Türkçe olsun.
-- Bütün seçenekler Türkçe olsun.
-- Her soru farklı bir kavramı ölçsün.
-- Aynı veya çok benzer soruları tekrar etme.
-- Her soru için source_fact alanına kaynak metinden 1-2 kısa cümle yaz.
-- Soruyu ve doğru cevabı yalnızca source_fact üzerinden oluştur.
-- Kaynakta bulunmayan bilgi uydurma.
-- Soru tek başına anlaşılabilir olsun.
-- Alt soru oluşturma.
-- Açık uçlu soru oluşturma.
-- Her soruda tam olarak 5 seçenek olsun.
-- Yalnızca bir seçenek doğru olsun.
-- Seçenekler anlamlı ve birbirinden farklı olsun.
-- Seçeneklerin başına A), B), C), D), E) yazma.
-- correct_answer yalnızca A, B, C, D veya E olsun.
-- Uzun ve gereksiz açıklamalar üretme.
-- Kaynağın farklı bölümlerinden soru seç.
-- Aynı başlık veya aynı kavramdan birden fazla soru üretme.
-- Soruları mümkün olduğunca farklı alt konulara dağıt.
-- Eğer kaynakta yeterli çeşitlilik varsa aynı kavram ailesini tekrar etme.
-- Yalnızca geçerli JSON döndür.
-- JSON dışında hiçbir şey yazma.
-
-ÇIKTI YAPISI:
-
-{{
-  "questions": [
-    {{
-      "source_fact": "...",
-      "question_text": "...",
-      "options": [
-        "...",
-        "...",
-        "...",
-        "...",
-        "..."
-      ],
-      "correct_answer": "A"
-    }}
-  ]
-}}
-
-DERS NOTU:
-
-{context}
-"""
-
-    max_attempts = 2
-    last_error = None
-
-    for attempt in range(1, max_attempts + 1):
-        attempt_started_at = time.perf_counter()
-
-        try:
-            num_predict = min(
-                5000,
-                max(900, question_count * 260)
-            )
-
-            raw_response = _generate_with_ollama(
-                prompt,
-                json_schema=batch_schema,
-                num_predict=num_predict,
-            )
-
-            parsed = json.loads(raw_response)
-
-            raw_questions = parsed.get("questions")
-
-            if not isinstance(raw_questions, list):
-                raise ValueError(
-                    "Ollama yanıtında questions listesi bulunamadı."
-                )
-
-            if len(raw_questions) != question_count:
-                raise ValueError(
-                    f"{question_count} soru bekleniyordu, "
-                    f"{len(raw_questions)} soru üretildi."
-                )
-
-            questions: list[QuizQuestion] = []
-
-            for raw_question in raw_questions:
-                generated = OllamaQuizQuestion.model_validate(
-                    raw_question
-                )
-
-                _validate_ollama_source_fact(generated)
-
-                generated_question = _to_quiz_question(
-                    generated
-                )
-
-                questions.append(generated_question)
-
-            quiz = QuizResponse(questions=questions)
-
-            quiz = _validate_quiz(
-                quiz,
-                question_count
-            )
-
-            attempt_duration = (
-                time.perf_counter() - attempt_started_at
-            )
-
-            total_duration = (
-                time.perf_counter() - quiz_started_at
-            )
-
-            print(
-                f"Ollama Quiz tek çağrıda tamamlandı: "
-                f"{len(quiz.questions)} soru, "
-                f"AI süresi {attempt_duration:.1f} sn, "
-                f"toplam {total_duration:.1f} sn"
-            )
-
-            return quiz
-
-        except (
-            json.JSONDecodeError,
-            ValueError,
-        ) as error:
-            last_error = error
-
-            attempt_duration = (
-                time.perf_counter() - attempt_started_at
-            )
-
-            print(
-                f"Ollama toplu quiz doğrulama hatası "
-                f"(deneme {attempt}/{max_attempts}, "
-                f"{attempt_duration:.1f} sn): {error}"
-            )
-
-            prompt += f"""
-
-ÖNCEKİ ÇIKTIN GEÇERSİZDİ.
-
-Hata:
-{error}
-
-Çıktıyı baştan oluştur.
-TAM OLARAK {question_count} soru döndür.
-Yalnızca JSON döndür.
-"""
-
-    raise OllamaServiceError(
-        "Yapay zeka geçerli quiz oluşturamadı."
-    ) from last_error
-
-
-# =========================================================
-# QUIZ TEST
-# =========================================================
-
-if __name__ == "__main__":
-
-    test_text = """
-    Olasılık, bir olayın gerçekleşme ihtimalini ifade eder.
-    Bir olayın olasılığı 0 ile 1 arasında değer alır.
-    Kesin olayın olasılığı 1, imkansız olayın olasılığı 0'dır.
-
-    Örneğin adil bir zar atıldığında 6 gelme olasılığı 1/6'dır.
-    """
-
-    result = generate_quiz(
-        test_text,
-        3
+def _quiz_prompt(
+    source_text: str,
+    question_count: int,
+    language: str,
+    previous_questions: Optional[list[str]] = None,
+    retry: bool = False,
+    rejection_reason: Optional[str] = None,
+) -> str:
+    previous_text = "\n".join(
+        f"- {question}" for question in (previous_questions or [])
+    ) or "- None"
+    retry_instruction = (
+        "Previous output was invalid. Return complete, valid JSON only."
+        if retry
+        else ""
     )
+    replacement_instruction = (
+        "The previous candidate tested a learning target already used in a "
+        "previous quiz. Generate a question about a DIFFERENT supported "
+        "concept from SOURCE TEXT."
+        if rejection_reason == "historical_learning_target"
+        else (
+            "The previous candidate duplicated this quiz. Generate a question "
+            "about a DIFFERENT supported fact or relationship."
+            if rejection_reason in {
+                "current_quiz_duplicate",
+                "current_learning_target_duplicate",
+            }
+            else (
+                "Do not mention the source, text, document, passage, material, "
+                "or phrases such as 'metne göre', 'kaynakta', 'bu belgede', "
+                "or 'verilen metinde'. Ask the question directly."
+                if rejection_reason == "meta_source_reference"
+                else ""
+            )
+        )
+    )
+    return f"""
+Create exactly {question_count} {language} multiple-choice questions.
 
-    print("\n===== QUIZ TEST =====")
+Rules:
+- Ground every question, answer, and concise explanation only in SOURCE TEXT;
+  never add general knowledge or mention the text/document/source.
+- Never write "metne göre", "metinde", "kaynakta", "belgede", "bu belgede",
+  "verilen metinde", or "yukarıdaki metne göre". Ask directly. Explanations
+  must explain the concept directly, never say where it was stated.
+- Use five distinct, balanced options with one answer (A-E). Distractors must
+  be plausible nearby concepts, not absurd, synonymous, duplicated, simple
+  negations/reversals, or all/none-of-the-above.
+- There must be exactly one clearly best answer. Each distractor must be
+  definitively wrong according to SOURCE TEXT, not a partly correct cause,
+  consequence, prerequisite, or subcomponent of the correct answer.
+- question_type is multiple_choice. Do not repeat PREVIOUS QUESTIONS or test
+  the same fact with different wording.
+- Do not ask another question that tests a previously used fact, relationship,
+  definition, cause, consequence, or learning target, even when rephrased.
+  Choose a different concept supported by SOURCE TEXT.
+- The question premise must agree logically with its correct answer and
+  explanation. Never state a false assumption as fact, especially by reversing
+  positive/negative meanings such as sees/does not see, increases/decreases,
+  exists/does not exist, or required/not required.
+- In Turkish, write natural, concise questions understood in one reading. Avoid
+  translated or circular patterns such as "neden önemli hale geldiği nedir".
+- Keep stems short and unambiguous. Do not ask for "the main reason" unless the
+  source explicitly identifies one unique main reason.
+- Match semantic categories: if asking for an ethical principle/concept, all
+  options must be peer-level principle/concept labels (for example Mahremiyet,
+  Şeffaflık, Adalet, Kullanıcı Kontrolü, Güvenlik), not indirect outcomes.
+- context_text is null unless useful. When used, copy only 1-3 short SOURCE TEXT
+  sentences; never reveal the answer or add facts.
+- When supported, balance direct concepts, cause/effect, comparison,
+  relationships, and short grounded inference. Do not force unsupported types.
+- Ignore references, bibliography, authors, years, titles, DOI, and URLs.
+- Explain why the answer is correct in 1-2 natural sentences. Do not quote the
+  source or say "the text states"; clarify likely confusion when useful.
+- Return only valid JSON matching OUTPUT FORMAT; no markdown or commentary.
+{retry_instruction}
+{replacement_instruction}
 
-    for i, question in enumerate(
-        result.questions,
-        start=1
+PREVIOUSLY TESTED LEARNING TARGETS:
+{previous_text}
+
+SOURCE TEXT:
+{source_text}
+
+OUTPUT FORMAT:
+{{"questions":[{{"question_type":"multiple_choice","context_text":null,
+"question_text":"...",
+"option_a":"...","option_b":"...","option_c":"...","option_d":"...",
+"option_e":"...","correct_answer":"A","explanation":"..."}}]}}
+/no_think
+"""
+
+
+def _important_quiz_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[^\W\d_]+", value.casefold())
+        if len(token) >= 4 and token not in _QUIZ_STOP_WORDS
+    }
+
+
+def _canonical_quiz_concept_tokens(value: str) -> set[str]:
+    generic_tokens = {
+        "aşağıdakilerden", "belirtilen", "bilgi", "hangisi", "ifade",
+        "hangi", "işlev", "işleve", "kavram", "nedir", "nelerdir",
+        "sahiptir", "seçenek", "temel", "verilen",
+    }
+    concepts = set()
+
+    for token in _important_quiz_tokens(value):
+        if token in generic_tokens:
+            continue
+
+        normalized_token = token[:6] if len(token) >= 7 else token
+        alias = next(
+            (
+                concept
+                for prefix, concept in _QUIZ_CONCEPT_ALIASES.items()
+                if token.startswith(prefix)
+            ),
+            None,
+        )
+        concepts.add(alias or normalized_token)
+
+    return concepts
+
+
+def _concept_overlap(first: set[str], second: set[str]) -> float:
+    smaller_count = min(len(first), len(second))
+    return len(first & second) / smaller_count if smaller_count else 0.0
+
+
+def _historical_question_fields(question: object) -> tuple[str, str, str]:
+    if isinstance(question, str):
+        return question, "", ""
+
+    if isinstance(question, dict):
+        return (
+            str(question.get("question_text") or ""),
+            str(question.get("correct_option") or ""),
+            str(question.get("explanation") or ""),
+        )
+
+    return "", "", ""
+
+
+def _compact_learning_targets(previous_questions: list[object]) -> list[str]:
+    targets = []
+
+    for previous_question in previous_questions[:_QUIZ_PREVIOUS_PROMPT_LIMIT]:
+        question_text, correct_option, _ = _historical_question_fields(
+            previous_question
+        )
+        question_preview = " ".join(question_text.split())[:110]
+        answer_preview = " ".join(correct_option.split())[:60]
+
+        if question_preview:
+            targets.append(
+                f"{question_preview} -> {answer_preview}"
+                if answer_preview
+                else question_preview
+            )
+
+    return targets
+
+
+def _quiz_relation_tags(value: str) -> set[str]:
+    normalized = _normalize_quiz_text(value)
+    return {
+        marker
+        for marker in _QUIZ_RELATION_MARKERS
+        if marker in normalized
+    }
+
+
+def _context_reveals_correct_option(
+    context_text: str,
+    correct_option: str,
+) -> bool:
+    normalized_context = _normalize_quiz_text(context_text)
+    normalized_answer = _normalize_quiz_text(correct_option)
+
+    if not normalized_answer:
+        return True
+
+    answer_word_count = len(normalized_answer.split())
+
+    if (
+        normalized_answer in normalized_context
+        and (len(normalized_answer) >= 12 or answer_word_count >= 2)
     ):
-
-        print(f"\nSoru {i}")
-
-        print(
-            "Tip:",
-            question.question_type
-        )
-
-        print(
-            "Soru:",
-            question.question_text
-        )
-
-        print(
-            "A:",
-            question.option_a
-        )
-
-        print(
-            "B:",
-            question.option_b
-        )
-
-        print(
-            "C:",
-            question.option_c
-        )
-
-        print(
-            "D:",
-            question.option_d
-        )
-
-        print(
-            "E:",
-            question.option_e
-        )
-
-        print(
-            "Cevap:",
-            question.correct_answer
-        )
-
-        print(
-            "Açıklama:",
-            question.explanation
-        )
-
-
-# =========================================================
-# AI FLASHCARD OLUŞTURMA
-# =========================================================
-
-class FlashcardItem(BaseModel):
-    question: str
-    answer: str
-
-
-class FlashcardResponse(BaseModel):
-    flashcards: list[FlashcardItem]
-
-
-def generate_flashcards(
-    text: str,
-    flashcard_count: int = 10
-):
-    flashcard_started_at = time.perf_counter()
-
-    max_context_chars = 18000
-
-    if len(text) <= max_context_chars:
-        context = text
-    else:
-        chunk_size = max_context_chars // 3
-
-        start_chunk = text[:chunk_size]
-
-        middle_start = max(
-            0,
-            (len(text) // 2) - (chunk_size // 2)
-        )
-        middle_chunk = text[
-            middle_start:middle_start + chunk_size
-        ]
-
-        end_chunk = text[-chunk_size:]
-
-        context = (
-            start_chunk
-            + "\n\n--- MIDDLE SECTION ---\n\n"
-            + middle_chunk
-            + "\n\n--- FINAL SECTION ---\n\n"
-            + end_chunk
-        )
-
-    schema = FlashcardResponse.model_json_schema()
-
-    prompt = f"""
-Create EXACTLY {flashcard_count} flashcards using only the course material below.
-
-RULES:
-
-- Create exactly {flashcard_count} flashcards.
-- Use only information explicitly supported by the course material.
-- Do not invent facts.
-- Preserve the language of the source material.
-- If the source is English, write the flashcards in English.
-- If the source is Turkish, write the flashcards in Turkish.
-- Each flashcard must test a different important concept.
-- Avoid duplicate or nearly identical flashcards.
-- Questions should be short, clear and understandable on their own.
-- Answers should be concise but sufficiently explanatory.
-- Do not create questions whose answers cannot be directly supported by the source.
-- Prefer definitions, concepts, responsibilities, relationships, processes and key facts.
-- Avoid unnecessary detail.
-- Return valid JSON only.
-- Do not return markdown or explanatory text outside the JSON.
-
-COURSE MATERIAL:
-
-{context}
-
-Return only this structure:
-
-{{
-  "flashcards": [
-    {{
-      "question": "...",
-      "answer": "..."
-    }}
-  ]
-}}
-"""
-
-    max_attempts = 2
-    last_error = None
-
-    for attempt in range(1, max_attempts + 1):
-        attempt_started_at = time.perf_counter()
-
-        try:
-            num_predict = min(
-                4000,
-                max(700, flashcard_count * 180)
-            )
-
-            raw_response = _generate_with_ollama(
-                prompt,
-                json_schema=schema,
-                num_predict=num_predict,
-            )
-
-            result = FlashcardResponse.model_validate(
-                json.loads(raw_response)
-            )
-
-            if len(result.flashcards) < flashcard_count:
-                missing_count = flashcard_count - len(result.flashcards)
-
-                existing_cards = "\n".join(
-                    f"- {card.question} -> {card.answer}"
-                    for card in result.flashcards
-                )
-
-                completion_prompt = f"""
-            The previous generation produced only {len(result.flashcards)}
-            flashcards instead of {flashcard_count}.
-            
-            Create EXACTLY {missing_count} ADDITIONAL flashcards.
-
-            RULES:
-            - Use only the course material below.
-            - Do not invent information.
-            - Do not repeat any of the existing flashcards.
-            - Each new flashcard must test a different important concept.
-            - Preserve the language of the source material.
-            - Questions must be short and clear.
-            - Answers must be concise but sufficiently explanatory.
-            - Return valid JSON only.
-            - Return EXACTLY {missing_count} flashcards.
-
-            EXISTING FLASHCARDS:
-
-            {existing_cards}
-
-            COURSE MATERIAL:
-
-            {context}
-
-            Return only:
-
-            {{
-              "flashcards": [
-                {{
-                  "question": "...",
-                  "answer": "..."
-                 }}
-               ]
-            }}
-            """
-
-                completion_schema = {
-                    "type": "object",
-                    "properties": {
-                        "flashcards": {
-                            "type": "array",
-                            "minItems": missing_count,
-                            "maxItems": missing_count,
-                            "items": FlashcardItem.model_json_schema(),
-                         }
-                    },
-                    "required": ["flashcards"],
-                    "additionalProperties": False,
-                }
-
-                completion_response = _generate_with_ollama(
-                    completion_prompt,
-                    json_schema=completion_schema,
-                    num_predict=max(500, missing_count * 180),
-                )
-
-                completion_result = FlashcardResponse.model_validate(
-                    json.loads(completion_response)
-                )
-
-                result.flashcards.extend(completion_result.flashcards)
-
-            if len(result.flashcards) != flashcard_count:
-                raise ValueError(
-                    f"{flashcard_count} flashcard bekleniyordu, "
-                    f"{len(result.flashcards)} üretildi."
-                )
-
-            normalized_questions = [
-                card.question.strip().lower()
-                for card in result.flashcards
-            ]
-
-            if len(set(normalized_questions)) != len(normalized_questions):
-                raise ValueError(
-                    "Tekrarlanan flashcard soruları üretildi."
-                )
-
-            attempt_duration = (
-                time.perf_counter() - attempt_started_at
-            )
-
-            total_duration = (
-                time.perf_counter() - flashcard_started_at
-            )
-
-            print(
-                f"Ollama Flashcard tamamlandı: "
-                f"{len(result.flashcards)} kart, "
-                f"AI süresi {attempt_duration:.1f} sn, "
-                f"toplam {total_duration:.1f} sn"
-            )
-
-            return result
-
-        except (
-            json.JSONDecodeError,
-            ValueError,
-        ) as error:
-            last_error = error
-
-            duration = (
-                time.perf_counter() - attempt_started_at
-            )
-
-            print(
-                f"Ollama flashcard doğrulama hatası "
-                f"(deneme {attempt}/{max_attempts}, "
-                f"{duration:.1f} sn): {error}"
-            )
-
-            prompt += f"""
-
-THE PREVIOUS OUTPUT WAS INVALID.
-
-Error:
-{error}
-
-Generate the flashcards again.
-Return EXACTLY {flashcard_count} unique flashcards.
-Return JSON only.
-"""
-
-    raise OllamaServiceError(
-        "Yapay zeka geçerli bilgi kartları oluşturamadı."
-    ) from last_error
-
-
-# =========================================================
-# AI ÇALIŞMA ÖNERİSİ
-# =========================================================
-
-class StudyRecommendation(BaseModel):
-    message: str
-    priority: str
-    recommended_action: str
-
-
-def generate_study_recommendation(
-    total_courses: int,
-    total_quizzes: int,
-    quiz_average: float,
-    total_flashcards: int,
-    flashcard_reviews: int,
-    weakest_course: Optional[str] = None,    
-    study_hours: float = 0
-):
-
-    prompt = f"""
-Bir öğrencinin çalışma verilerini analiz et ve
-ona kişiselleştirilmiş bir çalışma önerisi oluştur.
-
-Öğrenci verileri:
-
-- Toplam ders sayısı: {total_courses}
-- Toplam quiz sayısı: {total_quizzes}
-- Quiz ortalaması: {quiz_average}
-- Toplam flashcard sayısı: {total_flashcards}
-- Yapılan flashcard tekrar sayısı: {flashcard_reviews}
-- En zayıf ders: {weakest_course or "Belirlenmemiş"}
-- Çalışma süresi: {study_hours} saat
-
-Kurallar:
-
-- Türkçe yaz.
-- Öğrencinin verilerine göre gerçekçi bir öneri oluştur.
-- Verilmeyen bilgileri uydurma.
-- Kısa ve net ol.
-- Öğrenciye bugün ne yapması gerektiğini söyle.
-- Eğer quiz ortalaması düşükse quiz çalışmasına ağırlık ver.
-- Eğer flashcard tekrarları düşükse tekrar yapmasını öner.
-- En zayıf ders belli ise önceliği o derse ver.
-- Çalışma süresi düşükse uygulanabilir bir çalışma süresi öner.
-- Priority değeri yalnızca "low", "medium" veya "high" olabilir.
-
-message alanında öğrencinin mevcut durumunu
-kısa şekilde açıkla.
-
-recommended_action alanında öğrencinin bugün
-uygulayabileceği somut bir çalışma görevi ver.
-"""
-
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=StudyRecommendation,
-        ),
+        return True
+
+    answer_tokens = _canonical_quiz_concept_tokens(correct_option)
+    context_tokens = _canonical_quiz_concept_tokens(context_text)
+    token_overlap = (
+        len(answer_tokens & context_tokens) / len(answer_tokens)
+        if answer_tokens
+        else 0.0
+    )
+    literal_similarity = SequenceMatcher(
+        None,
+        normalized_answer,
+        normalized_context,
+    ).ratio()
+    return (
+        literal_similarity >= 0.78
+        or (len(answer_tokens) >= 3 and token_overlap >= 0.85)
     )
 
-    return response.parsed
 
-# =========================================================
-# PDF ÜZERİNDEN AI SOHBET
-# =========================================================
+def _is_simple_antonym_distractor(
+    correct_option: str,
+    distractor: str,
+) -> bool:
+    normalized_correct = _normalize_quiz_text(correct_option)
+    normalized_distractor = _normalize_quiz_text(distractor)
 
-def ask_ai_about_document(
-    document_text: str,
-    question: str
-):
-    prompt = f"""
-Sen StudyFlow AI adlı kişisel öğrenme platformunun
-ders asistanısın.
+    for correct_term, opposite_term in _SIMPLE_ANTONYM_PAIRS:
+        term_pairs = (
+            (correct_term, opposite_term),
+            (opposite_term, correct_term),
+        )
 
-Aşağıdaki ders notunu kaynak olarak kullanarak
-öğrencinin sorusunu cevapla.
+        for source_term, target_term in term_pairs:
+            if (
+                source_term in normalized_correct
+                and target_term in normalized_distractor
+            ):
+                repaired_distractor = normalized_distractor.replace(
+                    target_term,
+                    source_term,
+                )
 
-Kurallar:
-- Yalnızca verilen ders notundaki bilgilere dayan.
-- Ders notunda cevap yoksa bunu açıkça belirt.
-- Bilgi uydurma.
-- Türkçe cevap ver.
-- Anlaşılır ve öğretici ol.
-- Gereksiz uzun cevap verme.
+                if SequenceMatcher(
+                    None,
+                    normalized_correct,
+                    repaired_distractor,
+                ).ratio() >= 0.86:
+                    return True
 
-DERS NOTU:
-{document_text[:30000]}
+    return False
 
-ÖĞRENCİNİN SORUSU:
-{question}
-"""
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
+def _quiz_question_is_grounded(question: QuizQuestion, source_text: str) -> bool:
+    answer = getattr(
+        question,
+        f"option_{question.correct_answer.casefold()}",
+    )
+    evidence_text = " ".join((answer, question.explanation))
+    evidence_tokens = _important_quiz_tokens(evidence_text)
+    source_tokens = _important_quiz_tokens(source_text)
+
+    if not evidence_tokens:
+        return False
+
+    matches = sum(
+        any(
+            token == source_token
+            or (
+                min(len(token), len(source_token)) >= 6
+                and token[:6] == source_token[:6]
+            )
+            for source_token in source_tokens
+        )
+        for token in evidence_tokens
+    )
+    return matches >= 1 and matches / len(evidence_tokens) >= 0.10
+
+
+def _reject_quiz_question(reason: str, raw_question: object) -> None:
+    _quiz_validation_rejection_reason.set(reason)
+    question_text = (
+        raw_question.get("question_text", "")
+        if isinstance(raw_question, dict)
+        else ""
+    )
+    preview = " ".join(str(question_text).split())[:80]
+    logger.info("Quiz question rejected: reason=%s preview=%r", reason, preview)
+
+
+def _remove_meta_source_wording(value: str) -> str:
+    repaired = value
+
+    for pattern in _META_SOURCE_REPAIR_PATTERNS:
+        repaired = pattern.sub("", repaired)
+
+    repaired = re.sub(r"\s+([,.!?;:])", r"\1", repaired)
+    repaired = " ".join(repaired.split()).strip(" ,;:-–—")
+
+    if repaired:
+        repaired = repaired[0].upper() + repaired[1:]
+
+    return repaired
+
+
+def _repair_meta_source_candidate(raw_question: object) -> Optional[dict]:
+    if not isinstance(raw_question, dict):
+        return None
+
+    question_text = raw_question.get("question_text")
+    explanation = raw_question.get("explanation")
+
+    if not isinstance(question_text, str) or not isinstance(explanation, str):
+        return None
+
+    repaired_question = _remove_meta_source_wording(question_text)
+    repaired_explanation = _remove_meta_source_wording(explanation)
+
+    if (
+        not repaired_question
+        or not repaired_explanation
+        or _META_SOURCE_REFERENCE.search(repaired_question)
+        or _META_SOURCE_REFERENCE.search(repaired_explanation)
+        or not _canonical_quiz_concept_tokens(repaired_question)
+    ):
+        return None
+
+    repaired = dict(raw_question)
+    repaired["question_text"] = repaired_question
+    repaired["explanation"] = repaired_explanation
+    return repaired
+
+
+def _validate_quiz_question_with_meta_repair(
+    raw_question: object,
+    source_text: str,
+) -> Optional[QuizQuestion]:
+    question = _validate_quiz_question(raw_question, source_text)
+
+    if question is not None:
+        return question
+
+    if _quiz_validation_rejection_reason.get() != "meta_source_reference":
+        return None
+
+    logger.info("Quiz meta-source repair attempted")
+    repaired_candidate = _repair_meta_source_candidate(raw_question)
+
+    if repaired_candidate is None:
+        logger.info("Quiz meta-source repair result=rejected reason=unsafe_cleanup")
+        return None
+
+    question = _validate_quiz_question(repaired_candidate, source_text)
+    logger.info(
+        "Quiz meta-source repair result=%s reason=%s",
+        "accepted" if question is not None else "rejected",
+        _quiz_validation_rejection_reason.get() or "none",
+    )
+    return question
+
+
+def _question_has_false_premise(
+    question_text: str,
+    correct_option: str,
+    explanation: str,
+) -> bool:
+    if not _ASSERTIVE_PREMISE_MARKERS.search(question_text):
+        return False
+
+    answer_text = f"{correct_option} {explanation}"
+
+    return any(
+        (
+            positive.search(question_text)
+            and negative.search(answer_text)
+        ) or (
+            negative.search(question_text)
+            and positive.search(answer_text)
+        )
+        for positive, negative in _QUESTION_ANSWER_OPPOSITIONS
     )
 
-    return response.text
+
+def _has_ambiguous_distractor(
+    correct_option: str,
+    explanation: str,
+    distractors: list[str],
+) -> bool:
+    correct_evidence = _canonical_quiz_concept_tokens(
+        f"{correct_option} {explanation}"
+    )
+
+    for distractor in distractors:
+        distractor_tokens = _canonical_quiz_concept_tokens(distractor)
+        shared_tokens = correct_evidence & distractor_tokens
+        overlap = (
+            len(shared_tokens) / len(distractor_tokens)
+            if distractor_tokens
+            else 0.0
+        )
+
+        if SequenceMatcher(
+            None,
+            _normalize_quiz_text(correct_option),
+            _normalize_quiz_text(distractor),
+        ).ratio() >= 0.84 or (
+            len(shared_tokens) >= 2 and overlap >= 0.80
+        ):
+            return True
+
+    return False
 
 
-# =========================================================
-# AI ÇALIŞMA PLANI OLUŞTURMA
-# =========================================================
+def _validate_quiz_question(
+    raw_question: object,
+    source_text: str,
+) -> Optional[QuizQuestion]:
+    _quiz_validation_rejection_reason.set(None)
+    if not isinstance(raw_question, dict):
+        _reject_quiz_question("invalid_question_object", raw_question)
+        return None
 
-class StudyPlanItem(BaseModel):
-    day: str
-    course: str
-    duration_minutes: int
-    reason: str
+    question_text = raw_question.get("question_text")
+    explanation = raw_question.get("explanation")
+
+    if (
+        isinstance(question_text, str)
+        and _META_SOURCE_REFERENCE.search(question_text)
+    ) or (
+        isinstance(explanation, str)
+        and _META_SOURCE_REFERENCE.search(explanation)
+    ):
+        _reject_quiz_question("meta_source_reference", raw_question)
+        return None
+
+    required_fields = (
+        "question_text", "option_a", "option_b", "option_c", "option_d",
+        "option_e", "correct_answer", "explanation",
+    )
+
+    if any(
+        not isinstance(raw_question.get(field), str)
+        or not raw_question[field].strip()
+        for field in required_fields
+    ):
+        _reject_quiz_question("missing_field", raw_question)
+        return None
+
+    if any(pattern.search(question_text) for pattern in _UNNATURAL_QUESTION_PATTERNS):
+        _reject_quiz_question("unnatural_question_pattern", raw_question)
+        return None
+
+    if len(question_text) > 220:
+        _reject_quiz_question("question_too_long", raw_question)
+        return None
+
+    if (
+        "temel nedeni" in question_text.casefold()
+        and "temel neden" not in source_text.casefold()
+    ):
+        _reject_quiz_question("unsupported_main_reason", raw_question)
+        return None
+
+    options = [raw_question[f"option_{letter}"] for letter in "abcde"]
+    normalized_options = [_normalize_quiz_text(option) for option in options]
+
+    if any(not option for option in normalized_options):
+        _reject_quiz_question("missing_option", raw_question)
+        return None
+
+    if len(set(normalized_options)) != 5:
+        _reject_quiz_question("duplicate_options", raw_question)
+        return None
+
+    if any(option in _BANNED_QUIZ_OPTIONS for option in normalized_options):
+        _reject_quiz_question("banned_option", raw_question)
+        return None
+
+    correct_answer = raw_question["correct_answer"].strip().upper()
+
+    if correct_answer not in {"A", "B", "C", "D", "E"}:
+        _reject_quiz_question("invalid_correct_answer", raw_question)
+        return None
+
+    correct_option = options[ord(correct_answer) - ord("A")]
+    distractors = [
+        option
+        for index, option in enumerate(options)
+        if index != ord(correct_answer) - ord("A")
+    ]
+
+    if _question_has_false_premise(
+        question_text,
+        correct_option,
+        explanation,
+    ):
+        _reject_quiz_question("question_answer_contradiction", raw_question)
+        return None
+
+    if _has_ambiguous_distractor(correct_option, explanation, distractors):
+        _reject_quiz_question("ambiguous_distractor", raw_question)
+        return None
+
+    if _CATEGORY_QUESTION_PATTERN.search(question_text) and any(
+        len(option.split()) > 4 or _CATEGORY_OPTION_ACTION_PATTERN.search(option)
+        for option in options
+    ):
+        _reject_quiz_question("semantic_category_mismatch", raw_question)
+        return None
+
+    explanation_sentence_count = len(
+        re.findall(r"[.!?](?:\s|$)", explanation)
+    )
+    if explanation_sentence_count > 2 or re.search(
+        r"[\"“”].+[\"“”]",
+        explanation,
+    ):
+        _reject_quiz_question("invalid_explanation", raw_question)
+        return None
+
+    if any(
+        _is_simple_antonym_distractor(correct_option, distractor)
+        for distractor_index, distractor in enumerate(options)
+        if distractor_index != ord(correct_answer) - ord("A")
+    ):
+        _reject_quiz_question("simple_antonym_distractor", raw_question)
+        return None
+
+    context_text = raw_question.get("context_text")
+
+    if context_text is not None:
+        if not isinstance(context_text, str) or not context_text.strip():
+            _reject_quiz_question("invalid_context_text", raw_question)
+            return None
+
+        context_text = context_text.strip()
+        sentence_count = len(re.findall(r"[.!?](?:\s|$)", context_text))
+
+        if len(context_text) > 600 or sentence_count > 3:
+            _reject_quiz_question("invalid_context_text", raw_question)
+            return None
+
+        if not _important_quiz_tokens(context_text).intersection(
+            _important_quiz_tokens(source_text)
+        ):
+            _reject_quiz_question("ungrounded_context_text", raw_question)
+            return None
+
+        if _context_reveals_correct_option(context_text, correct_option):
+            _reject_quiz_question("context_reveals_answer", raw_question)
+            return None
+
+    try:
+        question = QuizQuestion(
+            question_type="multiple_choice",
+            context_text=context_text,
+            question_text=raw_question["question_text"].strip(),
+            option_a=options[0].strip(),
+            option_b=options[1].strip(),
+            option_c=options[2].strip(),
+            option_d=options[3].strip(),
+            option_e=options[4].strip(),
+            correct_answer=correct_answer,
+            explanation=raw_question["explanation"].strip(),
+        )
+    except ValueError:
+        _reject_quiz_question("schema_validation_failed", raw_question)
+        return None
+
+    if not _quiz_question_is_grounded(question, source_text):
+        _reject_quiz_question("grounding_failed", raw_question)
+        return None
+
+    return question
 
 
-class PlannerResponse(BaseModel):
-    weekly_plan: list[StudyPlanItem]
-    general_advice: str
+def _is_duplicate_quiz_question(
+    question_text: str,
+    accepted_questions: list[QuizQuestion],
+    previous_questions: Optional[list[str]] = None,
+) -> bool:
+    normalized = _normalize_quiz_text(question_text)
+    candidates = [
+        (accepted.question_text, False)
+        for accepted in accepted_questions
+    ] + [
+        (previous_question, True)
+        for previous_question in (previous_questions or [])
+    ]
+
+    for previous_question, is_historical in candidates:
+        previous = _normalize_quiz_text(previous_question)
+
+        if normalized == previous or SequenceMatcher(
+            None,
+            normalized,
+            previous,
+        ).ratio() >= 0.91:
+            return True
+
+        concept_tokens = _canonical_quiz_concept_tokens(question_text)
+        previous_tokens = _canonical_quiz_concept_tokens(
+            previous_question
+        )
+        shared_tokens = concept_tokens & previous_tokens
+        smaller_token_count = min(
+            len(concept_tokens),
+            len(previous_tokens),
+        )
+        concept_overlap = (
+            len(shared_tokens) / smaller_token_count
+            if smaller_token_count
+            else 0.0
+        )
+        shared_relations = _quiz_relation_tags(
+            question_text
+        ) & _quiz_relation_tags(previous_question)
+        relation_sets_match = (
+            _quiz_relation_tags(question_text)
+            == _quiz_relation_tags(previous_question)
+        )
+
+        if (
+            len(shared_tokens) >= 3
+            and concept_overlap >= 0.72
+            and (shared_relations or concept_overlap >= 0.86)
+        ):
+            return True
+
+        if (
+            is_historical
+            and len(shared_tokens) >= 2
+            and concept_overlap >= 0.65
+            and relation_sets_match
+        ):
+            return True
+
+    return False
 
 
-class PlannerServiceUnavailableError(Exception):
-    def __init__(self, status_code: int):
-        self.status_code = status_code
-        super().__init__("Gemini planner service is temporarily unavailable.")
+def _is_historical_learning_target_duplicate(
+    question: QuizQuestion,
+    previous_questions: list[object],
+) -> bool:
+    correct_option = getattr(
+        question,
+        f"option_{question.correct_answer.casefold()}",
+    )
+    question_tokens = _canonical_quiz_concept_tokens(question.question_text)
+    answer_tokens = _canonical_quiz_concept_tokens(correct_option)
+    explanation_tokens = _canonical_quiz_concept_tokens(question.explanation)
+
+    for previous_question in previous_questions:
+        previous_text, previous_answer, previous_explanation = (
+            _historical_question_fields(previous_question)
+        )
+
+        if not previous_text:
+            continue
+
+        normalized_candidate = _normalize_quiz_text(question.question_text)
+        normalized_previous = _normalize_quiz_text(previous_text)
+
+        if normalized_candidate == normalized_previous:
+            logger.info(
+                "CrossQuiz duplicate result=exact candidate=%r historical=%r",
+                question.question_text[:80],
+                previous_text[:80],
+            )
+            return True
+
+        text_similarity = SequenceMatcher(
+            None,
+            normalized_candidate,
+            normalized_previous,
+        ).ratio()
+
+        if text_similarity >= 0.90:
+            logger.info(
+                "CrossQuiz duplicate result=text_similarity similarity=%.3f "
+                "candidate=%r historical=%r",
+                text_similarity,
+                question.question_text[:80],
+                previous_text[:80],
+            )
+            return True
+
+        previous_question_tokens = _canonical_quiz_concept_tokens(previous_text)
+        previous_answer_tokens = _canonical_quiz_concept_tokens(previous_answer)
+        previous_explanation_tokens = _canonical_quiz_concept_tokens(
+            previous_explanation
+        )
+        question_overlap = _concept_overlap(
+            question_tokens,
+            previous_question_tokens,
+        )
+        answer_overlap = _concept_overlap(answer_tokens, previous_answer_tokens)
+        explanation_overlap = _concept_overlap(
+            explanation_tokens,
+            previous_explanation_tokens,
+        )
+        answer_similarity = SequenceMatcher(
+            None,
+            _normalize_quiz_text(correct_option),
+            _normalize_quiz_text(previous_answer),
+        ).ratio()
+        explanation_similarity = SequenceMatcher(
+            None,
+            _normalize_quiz_text(question.explanation),
+            _normalize_quiz_text(previous_explanation),
+        ).ratio()
+        answer_matches = answer_similarity >= 0.82 or answer_overlap >= 0.75
+
+        if (
+            answer_matches
+            and question_overlap >= 0.30
+            and explanation_overlap >= 0.30
+        ):
+            logger.info(
+                "CrossQuiz duplicate result=learning_target answer=%.3f "
+                "question=%.3f explanation=%.3f",
+                answer_overlap,
+                question_overlap,
+                explanation_overlap,
+            )
+            return True
+
+        if (
+            explanation_similarity >= 0.85
+            and (question_overlap >= 0.15 or answer_overlap >= 0.25)
+        ):
+            logger.info(
+                "CrossQuiz duplicate result=explanation similarity=%.3f",
+                explanation_similarity,
+            )
+            return True
+
+    return False
 
 
-def _transient_gemini_status(error: errors.APIError) -> Optional[int]:
-    code = getattr(error, "code", None)
+def _quiz_duplicate_reason(
+    question: QuizQuestion,
+    accepted_questions: list[QuizQuestion],
+    previous_questions: list[object],
+) -> Optional[str]:
+    if _is_duplicate_quiz_question(
+        question.question_text,
+        accepted_questions,
+    ):
+        logger.info(
+            "CrossQuiz candidate historical_count=%s result=current_quiz_duplicate",
+            len(previous_questions),
+        )
+        return "current_quiz_duplicate"
 
-    if code in (429, 503):
-        return code
+    accepted_learning_targets = [
+        {
+            "question_text": accepted.question_text,
+            "correct_option": getattr(
+                accepted,
+                f"option_{accepted.correct_answer.casefold()}",
+            ),
+            "explanation": accepted.explanation,
+        }
+        for accepted in accepted_questions
+    ]
+    if _is_historical_learning_target_duplicate(
+        question,
+        accepted_learning_targets,
+    ):
+        logger.info(
+            "CrossQuiz candidate historical_count=%s "
+            "result=current_learning_target_duplicate",
+            len(previous_questions),
+        )
+        return "current_learning_target_duplicate"
 
-    message = str(error).upper()
+    if _is_historical_learning_target_duplicate(question, previous_questions):
+        logger.info(
+            "CrossQuiz candidate historical_count=%s "
+            "result=historical_learning_target",
+            len(previous_questions),
+        )
+        return "historical_learning_target"
 
-    if "RESOURCE_EXHAUSTED" in message or "RATE LIMIT" in message:
-        return 429
-
-    if "UNAVAILABLE" in message:
-        return 503
+    logger.info(
+        "CrossQuiz candidate historical_count=%s result=accepted preview=%r",
+        len(previous_questions),
+        question.question_text[:80],
+    )
 
     return None
 
 
-def generate_study_plan(
-    courses,
-    events,
-    goals,
-    available_hours_per_day: float,
-    weekly_hours_target: float
-):
-
-    # ---------------------------------------------------------
-    # DERS BİLGİLERİ
-    # ---------------------------------------------------------
-
-    course_info = []
-
-    for course in courses:
-        course_info.append({
-            "id": course.id,
-            "name": course.name,
-            "description": course.description
-        })
-
-    # ---------------------------------------------------------
-    # EVENT BİLGİLERİ
-    # ---------------------------------------------------------
-
-    event_info = []
-
-    for event in events:
-        event_info.append({
-            "title": event.title,
-            "event_type": event.event_type,
-            "start_date": str(event.start_date),
-            "end_date": str(event.end_date) if event.end_date else None,
-            "course_id": event.course_id
-        })
-
-    # ---------------------------------------------------------
-    # HEDEF BİLGİLERİ
-    # ---------------------------------------------------------
-
-    goal_info = []
-
-    for goal in goals:
-        goal_info.append({
-            "title": goal.title,
-            "goal_type": goal.goal_type,
-            "target_value": goal.target_value,
-            "current_value": goal.current_value,
-            "start_date": str(goal.start_date),
-            "end_date": str(goal.end_date),
-            "completed": goal.completed,
-            "course_id": goal.course_id
-        })
-
-    # ---------------------------------------------------------
-    # GERÇEK DERS İSİMLERİ
-    # ---------------------------------------------------------
-
-    course_names = [
-        course.name
-        for course in courses
-    ]
-
-    # ---------------------------------------------------------
-    # PLANLAMA KAPASİTESİ
-    # ---------------------------------------------------------
-
-    daily_limit_minutes = int(
-        available_hours_per_day * 60
-    )
-
-    weekly_target_minutes = int(
-        weekly_hours_target * 60
-    )
-
-    maximum_weekly_minutes = (
-        daily_limit_minutes * 7
-    )
-
-    # Haftalık hedef günlük kapasiteden büyükse
-    # AI'ya gerçekçi maksimum süreyi bildiriyoruz.
-    effective_weekly_target_minutes = min(
-        weekly_target_minutes,
-        maximum_weekly_minutes
-    )
-
-    effective_weekly_target_hours = (
-        effective_weekly_target_minutes / 60
-    )
-
-    # ---------------------------------------------------------
-    # PROMPT
-    # ---------------------------------------------------------
-
-    prompt = f"""
-Sen StudyFlow AI adlı kişisel öğrenme platformunun
-AI çalışma planlayıcısısın.
-
-Öğrencinin mevcut verilerini analiz ederek
-önümüzdeki 7 gün için gerçekçi, dengeli ve
-uygulanabilir bir çalışma planı oluştur.
-
-==================================================
-ÖĞRENCİNİN BİLGİLERİ
-==================================================
-
-Günlük maksimum çalışma süresi:
-{available_hours_per_day} saat
-
-Günlük maksimum çalışma süresi:
-{daily_limit_minutes} dakika
-
-Öğrencinin haftalık çalışma hedefi:
-{weekly_hours_target} saat
-
-Öğrencinin uygulanabilir maksimum haftalık çalışma kapasitesi:
-{maximum_weekly_minutes} dakika
-
-Planlanması gereken haftalık çalışma süresi:
-{effective_weekly_target_minutes} dakika
-({effective_weekly_target_hours} saat)
-
-
-==================================================
-ÖĞRENCİNİN DERSLERİ
-==================================================
-
-{course_info}
-
-
-==================================================
-YAKLAŞAN ETKİNLİKLER
-==================================================
-
-{event_info}
-
-
-==================================================
-ÖĞRENCİNİN AKTİF HEDEFLERİ
-==================================================
-
-{goal_info}
-
-
-==================================================
-PLANLAMA KURALLARI
-==================================================
-
-1. Türkçe yaz.
-
-2. Tam olarak 7 günlük plan oluştur:
-   Pazartesi
-   Salı
-   Çarşamba
-   Perşembe
-   Cuma
-   Cumartesi
-   Pazar
-
-3. Günlük toplam çalışma süresi
-   {daily_limit_minutes} dakikayı kesinlikle geçmemelidir.
-
-4. Haftalık toplam çalışma süresi
-   mümkün olduğunca tam olarak
-   {effective_weekly_target_minutes} dakika olmalıdır.
-
-5. Haftalık hedef günlük kapasiteden büyükse,
-   günlük kapasiteyi aşma.
-   Bu durumda maksimum uygulanabilir süreyi kullan.
-
-6. Dersleri yalnızca öğrencinin gerçek
-   ders listesinden seç.
-
-7. Öğrencinin ders listesinde olmayan hiçbir
-   ders oluşturma.
-
-8. Ders isimlerini kesinlikle birleştirme.
-
-   Örneğin:
-
-   YANLIŞ:
-   "Matematik ve Veri Yapıları"
-
-   DOĞRU:
-   "Matematik"
-
-   veya:
-
-   "Veri Yapıları"
-
-9. Her plan öğesinde yalnızca BİR ders bulunmalıdır.
-
-10. Bir güne birden fazla çalışma kaydı
-    koyabilirsin.
-
-11. Yaklaşan sınavlara öncelik ver.
-
-12. Yaklaşan ödevlere öncelik ver.
-
-13. Yaklaşan projelere öncelik ver.
-
-14. Aktif hedefleri dikkate al.
-
-15. Dersleri mümkün olduğunca dengeli dağıt.
-
-16. Aynı dersi gereksiz şekilde her güne koyma.
-
-17. Ancak yaklaşan sınav veya önemli bir
-    deadline varsa ilgili derse daha fazla
-    çalışma süresi ayırabilirsin.
-
-18. Konu bilgisi verilmediği için konu
-    uydurma.
-
-19. Output içinde topics alanı bulunmayacaktır.
-
-20. Her çalışma kaydının duration_minutes
-    değeri gerçekçi olmalıdır.
-
-21. Çalışma süreleri dakika cinsinden olmalıdır.
-
-22. Her gün mutlaka çalışma kaydı oluşturmak
-    zorunda değilsin.
-
-23. Fakat 7 günlük plan içerisinde toplam
-    çalışma süresini haftalık hedefe
-    mümkün olduğunca tam olarak ulaştır.
-
-24. Tamamlanmış hedefleri dikkate alma.
-
-25. Tamamlanmış eventleri dikkate alma.
-
-26. Verilmeyen bilgileri uydurma.
-
-27. general_advice içerisinde yanlış bir
-    haftalık toplam süre belirtme.
-
-28. Planın toplam süresini hesaplarken
-    duration_minutes değerlerini dikkate al.
-
-29. Haftalık hedef:
-    {effective_weekly_target_minutes} dakika.
-
-30. Bu hedefi aşma.
-
-31. Mümkünse bu hedefin altında da kalma.
-
-
-==================================================
-GEÇERLİ DERSLER
-==================================================
-
-course alanı SADECE aşağıdaki değerlerden
-biri olabilir:
-
-{course_names}
-
-
-==================================================
-ÇIKTI KURALLARI
-==================================================
-
-JSON dışında hiçbir şey döndürme.
-
-weekly_plan içerisindeki her nesne şu alanlara
-sahip olmalıdır:
-
-- day
-- course
-- duration_minutes
-- reason
-
-topics ALANI KULLANMA.
-
-Her nesnede yalnızca bir ders olmalıdır.
-
-course değeri yukarıdaki gerçek derslerden
-biri olmalıdır.
-
-duration_minutes pozitif bir sayı olmalıdır.
-
-general_advice kısa ve Türkçe olmalıdır.
-
-Plan öğrencinin günlük ve haftalık çalışma
-kapasitesini aşmamalıdır.
-"""
-
-    # ---------------------------------------------------------
-    # GEMINI
-    # ---------------------------------------------------------
-
-    maximum_attempts = 3
-
-    for attempt in range(1, maximum_attempts + 1):
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=PlannerResponse,
-                ),
+def _first_stream_question_historical_duplicate_reason(
+    question: QuizQuestion,
+    previous_questions: list[object],
+) -> Optional[str]:
+    normalized_candidate = _normalize_quiz_text(question.question_text)
+
+    for previous_question in previous_questions:
+        previous_text, _, _ = _historical_question_fields(previous_question)
+        normalized_previous = _normalize_quiz_text(previous_text)
+
+        if not normalized_previous:
+            continue
+
+        if normalized_candidate == normalized_previous:
+            logger.info("CrossQuiz first candidate result=historical_exact")
+            return "historical_exact_duplicate"
+
+        similarity = SequenceMatcher(
+            None,
+            normalized_candidate,
+            normalized_previous,
+        ).ratio()
+        if similarity >= 0.90:
+            logger.info(
+                "CrossQuiz first candidate result=historical_textual "
+                "similarity=%.3f",
+                similarity,
             )
-            break
-        except errors.APIError as error:
-            transient_status = _transient_gemini_status(error)
+            return "historical_textual_duplicate"
 
-            if transient_status is None:
+    return None
+
+
+def _parse_quiz_response(raw_response: str) -> list[object]:
+    parsed = json.loads(_clean_json_response(raw_response))
+
+    if not isinstance(parsed, dict) or not isinstance(
+        parsed.get("questions"),
+        list,
+    ):
+        raise ValueError("LM Studio quiz yanıtında questions listesi yok.")
+
+    return parsed["questions"]
+
+
+def _is_context_size_error(error: LMStudioServiceError) -> bool:
+    current_error = error
+
+    while current_error is not None:
+        response = getattr(current_error, "response", None)
+        response_text = getattr(response, "text", "")
+        error_text = f"{current_error} {response_text}".casefold()
+
+        if (
+            "context size" in error_text
+            or "context length" in error_text
+            or "context_length_exceeded" in error_text
+        ):
+            return True
+
+        current_error = getattr(current_error, "__cause__", None)
+
+    return False
+
+
+def _shrink_quiz_source(source_text: str) -> str:
+    if len(source_text) <= _QUIZ_FALLBACK_CHUNK_CHARS:
+        return source_text
+
+    shortened = source_text[:_QUIZ_FALLBACK_CHUNK_CHARS]
+    boundary = max(shortened.rfind(marker) for marker in (". ", "! ", "? ", "\n"))
+
+    if boundary >= int(_QUIZ_FALLBACK_CHUNK_CHARS * 0.65):
+        shortened = shortened[:boundary + 1]
+
+    return shortened.strip()
+
+
+def _request_quiz_questions(
+    source_text: str,
+    question_count: int,
+    language: str,
+    previous_questions: list[str],
+    *,
+    allow_retry: bool,
+    rejection_reason: Optional[str] = None,
+) -> list[object]:
+    attempts = 2 if allow_retry else 1
+    last_error = None
+    logger.info(
+        "CrossQuiz prompt learning_target_count=%s",
+        len(previous_questions),
+    )
+
+    for attempt in range(attempts):
+        try:
+            prompt = _quiz_prompt(
+                source_text,
+                question_count,
+                language,
+                previous_questions,
+                retry=attempt > 0,
+                rejection_reason=rejection_reason,
+            )
+            raw_response = _generate_with_lmstudio(
+                prompt,
+                json_schema=_quiz_json_schema(question_count),
+                num_predict=max(420, question_count * 260),
+                model=LMSTUDIO_QUIZ_MODEL,
+            )
+            return _parse_quiz_response(raw_response)
+        except LMStudioServiceError as error:
+            if not _is_context_size_error(error):
                 raise
 
-            if attempt == maximum_attempts:
-                raise PlannerServiceUnavailableError(
-                    transient_status
-                ) from error
+            fallback_source = _shrink_quiz_source(source_text)
 
-            time.sleep(2 ** (attempt - 1))
+            if fallback_source == source_text:
+                raise
 
-    # ---------------------------------------------------------
-    # AI CEVABI KONTROL
-    # ---------------------------------------------------------
-
-    if response.parsed is None:
-
-        print("AI PLANNER RESPONSE PARSED NONE")
-        print("AI RESPONSE TEXT:")
-        print(response.text)
-
-        raise ValueError(
-            "AI Planner geçerli bir plan oluşturamadı."
-        )
-
-    result = response.parsed
-
-    # ---------------------------------------------------------
-    # BACKEND KONTROLLERİ
-    # ---------------------------------------------------------
-
-    valid_course_names = set(course_names)
-
-    total_minutes = 0
-
-    for item in result.weekly_plan:
-
-        # Geçersiz ders kontrolü
-        if item.course not in valid_course_names:
-
-            raise ValueError(
-                f"AI geçersiz bir ders oluşturdu: {item.course}"
+            logger.warning(
+                "Quiz context limit exceeded; retrying with %s characters",
+                len(fallback_source),
+            )
+            fallback_prompt = _quiz_prompt(
+                fallback_source,
+                question_count,
+                language,
+                previous_questions,
+                retry=True,
+                rejection_reason=rejection_reason,
+            )
+            raw_response = _generate_with_lmstudio(
+                fallback_prompt,
+                json_schema=_quiz_json_schema(question_count),
+                num_predict=max(420, question_count * 260),
+                model=LMSTUDIO_QUIZ_MODEL,
+            )
+            return _parse_quiz_response(raw_response)
+        except (json.JSONDecodeError, ValueError) as error:
+            last_error = error
+            logger.warning(
+                "Quiz JSON attempt %s/%s failed: %s",
+                attempt + 1,
+                attempts,
+                error,
             )
 
-        # Günlük limit kontrolü daha aşağıda
-        total_minutes += item.duration_minutes
+    logger.warning("Quiz chunk skipped after invalid JSON: %s", last_error)
+    return []
 
-    # ---------------------------------------------------------
-    # HAFTALIK TOPLAM KONTROLÜ
-    # ---------------------------------------------------------
 
-    if total_minutes > effective_weekly_target_minutes:
-
-        raise ValueError(
-            f"AI haftalık çalışma hedefini aştı. "
-            f"Hedef: {effective_weekly_target_minutes} dakika, "
-            f"oluşturulan: {total_minutes} dakika."
-        )
-
-    # ---------------------------------------------------------
-    # GÜNLÜK TOPLAM KONTROLÜ
-    # ---------------------------------------------------------
-
-    daily_totals = {}
-
-    for item in result.weekly_plan:
-
-        daily_totals[item.day] = (
-            daily_totals.get(item.day, 0)
-            + item.duration_minutes
-        )
-
-    for day, total in daily_totals.items():
-
-        if total > daily_limit_minutes:
-
-            raise ValueError(
-                f"{day} günü günlük çalışma limitini aşıyor. "
-                f"Limit: {daily_limit_minutes} dakika, "
-                f"oluşturulan: {total} dakika."
+def _generate_valid_quiz_chunk(
+    chunk: str,
+    requested_count: int,
+    language: str,
+    previous_questions: list[str],
+) -> tuple[list[QuizQuestion], int]:
+    raw_questions = _request_quiz_questions(
+        chunk,
+        requested_count,
+        language,
+        previous_questions,
+        allow_retry=True,
+    )
+    valid_questions = [
+        question
+        for raw_question in raw_questions[:requested_count]
+        if (
+            question := _validate_quiz_question_with_meta_repair(
+                raw_question,
+                chunk,
             )
+        ) is not None
+    ]
+    return valid_questions, len(raw_questions)
 
-    # ---------------------------------------------------------
-    # SONUÇ
-    # ---------------------------------------------------------
 
-    print(
-        f"AI Planner oluşturuldu. "
-        f"Haftalık toplam: {total_minutes} dakika / "
-        f"{effective_weekly_target_minutes} dakika"
+def generate_quiz_questions(
+    text: str,
+    question_count: int = 10,
+    previous_questions: Optional[list[object]] = None,
+):
+    if not text or not text.strip():
+        raise LMStudioServiceError("Quiz soruları oluşturulamadı.")
+
+    chunks = _split_quiz_source(text)
+    historical_questions = (previous_questions or [])[
+        :_QUIZ_PREVIOUS_PROMPT_LIMIT
+    ]
+    prompt_targets = _compact_learning_targets(historical_questions)
+    selected_chunks = _select_quiz_chunks(
+        chunks,
+        question_count,
+        historical_questions,
     )
 
-    return result
+    if not selected_chunks:
+        raise LMStudioServiceError("Quiz soruları oluşturulamadı.")
+
+    language = _detect_quiz_language(text)
+    distribution = _distribute_quiz_questions(
+        question_count,
+        len(selected_chunks),
+    )
+    accepted_questions: list[QuizQuestion] = []
+    last_duplicate_reason = None
+    logger.info("Quiz generation started")
+    logger.info("Selected chunks: %s", len(selected_chunks))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = []
+
+        for chunk_index, (chunk, requested_count) in enumerate(
+            zip(selected_chunks, distribution),
+            start=1,
+        ):
+            logger.info(
+                "Chunk %s requested questions=%s",
+                chunk_index,
+                requested_count,
+            )
+            futures.append(
+                executor.submit(
+                    _generate_valid_quiz_chunk,
+                    chunk,
+                    requested_count,
+                    language,
+                    prompt_targets,
+                )
+            )
+
+        for chunk_index, future in enumerate(futures, start=1):
+            valid_questions, raw_question_count = future.result()
+            accepted_in_chunk = 0
+            duplicate_count = 0
+
+            for question in valid_questions:
+                duplicate_reason = _quiz_duplicate_reason(
+                    question,
+                    accepted_questions,
+                    historical_questions,
+                )
+                if duplicate_reason:
+                    last_duplicate_reason = duplicate_reason
+                    duplicate_count += 1
+                    logger.info(
+                        "Quiz question rejected: reason=%s preview=%r",
+                        duplicate_reason,
+                        question.question_text[:80],
+                    )
+                    continue
+
+                accepted_questions.append(question)
+                accepted_in_chunk += 1
+                logger.info(
+                    "Question %s validated",
+                    len(accepted_questions),
+                )
+                yield question
+
+            logger.info(
+                "Quiz chunk result: chunk=%s requested_count=%s "
+                "raw_count=%s validated_count=%s duplicate_count=%s "
+                "accepted_total=%s",
+                chunk_index,
+                distribution[chunk_index - 1],
+                raw_question_count,
+                len(valid_questions),
+                duplicate_count,
+                len(accepted_questions),
+            )
+
+    missing_count = question_count - len(accepted_questions)
+
+    for fill_round in range(1, _QUIZ_MAX_FILL_ROUNDS + 1):
+        missing_count = question_count - len(accepted_questions)
+
+        if missing_count <= 0:
+            break
+
+        fill_source = selected_chunks[(fill_round - 1) % len(selected_chunks)]
+        logger.info(
+            "Quiz fill round started: round=%s requested_count=%s chunk=%s",
+            fill_round,
+            missing_count,
+            ((fill_round - 1) % len(selected_chunks)) + 1,
+        )
+        fill_questions = _request_quiz_questions(
+            fill_source,
+            missing_count,
+            language,
+            (
+                [question.question_text for question in accepted_questions]
+                + prompt_targets
+            )[:_QUIZ_PREVIOUS_PROMPT_LIMIT],
+            allow_retry=False,
+            rejection_reason=last_duplicate_reason,
+        )
+        validated_count = 0
+        duplicate_count = 0
+
+        for raw_question in fill_questions[:missing_count]:
+            question = _validate_quiz_question_with_meta_repair(
+                raw_question,
+                fill_source,
+            )
+
+            if question is None:
+                continue
+
+            validated_count += 1
+
+            duplicate_reason = _quiz_duplicate_reason(
+                question,
+                accepted_questions,
+                historical_questions,
+            )
+            if duplicate_reason:
+                last_duplicate_reason = duplicate_reason
+                duplicate_count += 1
+                logger.info(
+                    "Quiz fill question rejected: reason=%s preview=%r",
+                    duplicate_reason,
+                    question.question_text[:80],
+                )
+                continue
+
+            accepted_questions.append(question)
+            logger.info("Question %s validated", len(accepted_questions))
+            yield question
+
+            if len(accepted_questions) == question_count:
+                break
+
+        logger.info(
+            "Quiz fill round result: round=%s requested_count=%s raw_count=%s "
+            "validated_count=%s duplicate_count=%s accepted_total=%s",
+            fill_round,
+            missing_count,
+            len(fill_questions),
+            validated_count,
+            duplicate_count,
+            len(accepted_questions),
+        )
+
+    if len(accepted_questions) != question_count:
+        raise LMStudioServiceError("Quiz soruları oluşturulamadı.")
+
+    logger.info(
+        "Quiz generation completed: %s questions",
+        len(accepted_questions),
+    )
+
+
+def generate_quiz_questions_stream(
+    text: str,
+    question_count: int = 10,
+    previous_questions: Optional[list[object]] = None,
+):
+    """Pipeline micro-batches concurrently and yield validated questions in order."""
+    if not text or not text.strip():
+        raise LMStudioServiceError("Quiz soruları oluşturulamadı.")
+
+    chunks = _split_quiz_source(text)
+    historical_questions = (previous_questions or [])[
+        :_QUIZ_PREVIOUS_PROMPT_LIMIT
+    ]
+    prompt_targets = _compact_learning_targets(historical_questions)
+    selected_chunks = _select_quiz_chunks(
+        chunks,
+        question_count,
+        historical_questions,
+    )
+
+    if not selected_chunks:
+        raise LMStudioServiceError("Quiz soruları oluşturulamadı.")
+
+    language = _detect_quiz_language(text)
+    accepted_questions: list[QuizQuestion] = []
+    batch_plan = [1] + [
+        min(_QUIZ_STREAM_BATCH_SIZE, question_count - start)
+        for start in range(1, question_count, _QUIZ_STREAM_BATCH_SIZE)
+    ]
+    chunk_cursor = 0
+    stream_started_at = time.monotonic()
+    active_lock = threading.Lock()
+    active_batch_count = 0
+    priority_mode_active = True
+    lm_call_count = 0
+    total_replacement_count = 0
+
+    def request_batch(
+        batch_id: int,
+        output_slots: int,
+        candidate_count: int,
+        source_chunk: str,
+        previous_targets: list[str],
+        rejection_reason: Optional[str],
+        replacement: bool,
+        priority: bool,
+        source_chunk_index: int,
+    ) -> dict:
+        nonlocal active_batch_count
+        started_wall = time.time()
+        started_monotonic = time.monotonic()
+
+        with active_lock:
+            active_batch_count += 1
+            active_now = active_batch_count
+
+        logger.info(
+            "Quiz pipeline batch=%s slots=%s candidates_requested=%s "
+            "priority=%s "
+            "started start_time=%.3f active=%s replacement=%s source_chunk=%s",
+            batch_id,
+            output_slots,
+            candidate_count,
+            priority,
+            started_wall,
+            active_now,
+            replacement,
+            source_chunk_index,
+        )
+
+        try:
+            raw_questions = _request_quiz_questions(
+                source_chunk,
+                candidate_count,
+                language,
+                previous_targets,
+                allow_retry=False,
+                rejection_reason=rejection_reason,
+            )
+            return {
+                "raw_questions": raw_questions,
+                "source_chunk": source_chunk,
+                "source_chunk_index": source_chunk_index,
+                "lm_duration": time.monotonic() - started_monotonic,
+                "completed_monotonic": time.monotonic(),
+            }
+        finally:
+            finished_wall = time.time()
+            duration = time.monotonic() - started_monotonic
+            with active_lock:
+                active_batch_count -= 1
+                active_now = active_batch_count
+            logger.info(
+                "Quiz pipeline batch=%s completed finish_time=%.3f "
+                "lm_duration=%.1fs active=%s replacement=%s priority=%s",
+                batch_id,
+                finished_wall,
+                duration,
+                active_now,
+                replacement,
+                priority,
+            )
+
+    def next_source_chunk() -> tuple[int, str]:
+        nonlocal chunk_cursor
+        source_chunk_index = chunk_cursor % len(selected_chunks)
+        chunk_cursor += 1
+        return source_chunk_index, selected_chunks[source_chunk_index]
+
+    def prompt_snapshot() -> list[str]:
+        return (
+            [question.question_text for question in accepted_questions]
+            + prompt_targets
+        )[:_QUIZ_PREVIOUS_PROMPT_LIMIT]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        pending_futures = {}
+        batch_states = {}
+        next_batch_to_submit = 1
+        fill_batch_submitted = False
+
+        def submit_batch(
+            batch_id: int,
+            requested_count: int,
+            *,
+            priority: bool,
+            replacement: bool = False,
+            rejection_reason: Optional[str] = None,
+        ) -> bool:
+            nonlocal lm_call_count, total_replacement_count
+            state = batch_states.get(batch_id)
+            if state is None:
+                state = {
+                    "requested": requested_count,
+                    "priority": priority,
+                    "attempt": 0,
+                    "accepted": 0,
+                    "raw": 0,
+                    "candidates_requested": 0,
+                    "valid": 0,
+                    "duplicates": 0,
+                    "replacements": 0,
+                    "lm_duration": 0.0,
+                    "started_at": time.monotonic(),
+                }
+                batch_states[batch_id] = state
+
+            source_chunk_index, source_chunk = next_source_chunk()
+            state["attempt"] += 1
+            if replacement:
+                state["replacements"] += 1
+                total_replacement_count += 1
+
+            candidate_count = (
+                requested_count + 1
+                if requested_count == _QUIZ_STREAM_BATCH_SIZE
+                else requested_count
+            )
+            state["candidates_requested"] += candidate_count
+            lm_call_count += 1
+
+            future = executor.submit(
+                request_batch,
+                batch_id,
+                requested_count,
+                candidate_count,
+                source_chunk,
+                prompt_snapshot(),
+                rejection_reason,
+                replacement,
+                priority,
+                source_chunk_index + 1,
+            )
+            pending_futures[future] = batch_id
+            return True
+
+        def submit_next_planned_batch() -> bool:
+            nonlocal next_batch_to_submit
+            if next_batch_to_submit > len(batch_plan):
+                return False
+
+            batch_id = next_batch_to_submit
+            next_batch_to_submit += 1
+            return submit_batch(
+                batch_id,
+                batch_plan[batch_id - 1],
+                priority=batch_id == 1,
+            )
+
+        while next_batch_to_submit <= min(2, len(batch_plan)):
+            submit_next_planned_batch()
+
+        while len(accepted_questions) < question_count:
+            if not pending_futures:
+                if submit_next_planned_batch():
+                    continue
+
+                if not accepted_questions and len(batch_plan) == 1:
+                    raise LMStudioServiceError("Quiz soruları oluşturulamadı.")
+
+                if fill_batch_submitted:
+                    raise LMStudioServiceError("Quiz soruları oluşturulamadı.")
+
+                missing_count = question_count - len(accepted_questions)
+                fill_batch_submitted = True
+                fill_batch_id = len(batch_plan) + 1
+                if not submit_batch(
+                    fill_batch_id,
+                    min(_QUIZ_STREAM_BATCH_SIZE, missing_count),
+                    priority=False,
+                ):
+                    raise LMStudioServiceError("Quiz soruları oluşturulamadı.")
+                continue
+
+            completed, _ = wait(
+                tuple(pending_futures),
+                return_when=FIRST_COMPLETED,
+            )
+            completed_results = []
+            for future in completed:
+                batch_id = pending_futures.pop(future)
+                result = future.result()
+                completed_results.append((
+                    result["completed_monotonic"],
+                    batch_id,
+                    result,
+                ))
+
+            for _, batch_id, result in sorted(completed_results):
+                state = batch_states[batch_id]
+                requested_batch_size = state["requested"]
+                raw_questions = result["raw_questions"]
+                source_chunk = result["source_chunk"]
+                source_chunk_index = result["source_chunk_index"]
+                state["lm_duration"] += result["lm_duration"]
+                state["raw"] += len(raw_questions)
+                newly_accepted = []
+                attempt_rejection_reason = None
+                rejection_reason = None
+
+                for raw_question in raw_questions:
+                    slot = len(accepted_questions) + 1
+                    question = _validate_quiz_question_with_meta_repair(
+                        raw_question,
+                        source_chunk,
+                    )
+
+                    if question is None:
+                        rejection_reason = (
+                            _quiz_validation_rejection_reason.get() or "unknown"
+                        )
+                        attempt_rejection_reason = rejection_reason
+                        logger.info(
+                            "Quiz stream validation: slot=%s batch=%s attempt=%s "
+                            "valid=false reason=%s",
+                            slot,
+                            batch_id,
+                            state["attempt"],
+                            rejection_reason,
+                        )
+                        continue
+
+                    state["valid"] += 1
+                    if not accepted_questions:
+                        rejection_reason = (
+                            _first_stream_question_historical_duplicate_reason(
+                                question,
+                                historical_questions,
+                            )
+                        )
+                    else:
+                        rejection_reason = _quiz_duplicate_reason(
+                            question,
+                            accepted_questions,
+                            historical_questions,
+                        )
+
+                    if rejection_reason:
+                        attempt_rejection_reason = rejection_reason
+                        state["duplicates"] += 1
+                        logger.info(
+                            "Quiz stream duplicate: slot=%s batch=%s attempt=%s "
+                            "result=%s preview=%r",
+                            slot,
+                            batch_id,
+                            state["attempt"],
+                            rejection_reason,
+                            question.question_text[:80],
+                        )
+                        continue
+
+                    if state["accepted"] >= requested_batch_size:
+                        logger.info(
+                            "Quiz stream surplus candidate ignored: "
+                            "batch=%s attempt=%s preview=%r",
+                            batch_id,
+                            state["attempt"],
+                            question.question_text[:80],
+                        )
+                        continue
+
+                    accepted_questions.append(question)
+                    newly_accepted.append(question)
+                    state["accepted"] += 1
+
+                    if priority_mode_active:
+                        priority_mode_active = False
+                        logger.info(
+                            "Quiz priority mode ended first_valid=true batch=%s",
+                            batch_id,
+                        )
+
+                missing_in_batch = requested_batch_size - state["accepted"]
+                max_batch_attempts = (
+                    1
+                    if state["priority"]
+                    else 2
+                )
+
+                if state["priority"]:
+                    logger.info(
+                        "Quiz first-question attempt "
+                        "FIRST_QUESTION_ATTEMPT=%s/%s rejection_reason=%s "
+                        "source_chunk=%s duration=%.1fs result=%s",
+                        state["attempt"],
+                        max_batch_attempts,
+                        attempt_rejection_reason or (
+                            "none" if missing_in_batch == 0 else "no_candidate"
+                        ),
+                        source_chunk_index,
+                        result["lm_duration"],
+                        "accepted" if missing_in_batch == 0 else "rejected",
+                    )
+
+                successor_submitted = False
+                if (
+                    missing_in_batch > 0
+                    and state["attempt"] < max_batch_attempts
+                    and not (
+                        state["priority"] and not priority_mode_active
+                    )
+                ):
+                    successor_submitted = submit_batch(
+                        batch_id,
+                        missing_in_batch,
+                        priority=state["priority"],
+                        replacement=True,
+                        rejection_reason=rejection_reason,
+                    )
+
+                if not successor_submitted:
+                    should_wait_for_first_normal_batch = (
+                        state["priority"]
+                        and priority_mode_active
+                        and bool(pending_futures)
+                    )
+                    if not should_wait_for_first_normal_batch:
+                        submit_next_planned_batch()
+
+                for question in newly_accepted:
+                    accepted_index = accepted_questions.index(question) + 1
+                    if accepted_index == 1:
+                        first_valid_latency = (
+                            time.monotonic() - stream_started_at
+                        )
+                        latency_logger = (
+                            logger.warning
+                            if first_valid_latency > 40
+                            else logger.info
+                        )
+                        latency_logger(
+                            "Quiz first valid question streamed "
+                            "FIRST_VALID_QUESTION_LATENCY=%.1fs batch=%s",
+                            first_valid_latency,
+                            batch_id,
+                        )
+                    logger.info(
+                        "Quiz stream question accepted: completed=%s total=%s",
+                        accepted_index,
+                        question_count,
+                    )
+                    yield question
+
+                if not successor_submitted:
+                    logger.info(
+                        "Quiz batch=%s slots=%s candidates_requested=%s "
+                        "priority=%s lm_duration=%.1fs raw=%s valid=%s "
+                        "accepted=%s duplicates=%s replacements=%s "
+                        "replacement_needed=%s streamed=%s elapsed=%.1fs",
+                        batch_id,
+                        requested_batch_size,
+                        state["candidates_requested"],
+                        state["priority"],
+                        state["lm_duration"],
+                        state["raw"],
+                        state["valid"],
+                        state["accepted"],
+                        state["duplicates"],
+                        state["replacements"],
+                        missing_in_batch,
+                        state["accepted"],
+                        time.monotonic() - stream_started_at,
+                    )
+
+                if missing_in_batch > 0 and not successor_submitted:
+                    deficit_action = (
+                        "error"
+                        if state["priority"] and len(batch_plan) == 1
+                        else (
+                            "normal_pipeline"
+                            if state["priority"]
+                            else "single_fill_or_error"
+                        )
+                    )
+                    logger.warning(
+                        "Quiz stream batch exhausted: batch=%s requested=%s "
+                        "streamed=%s attempts=%s historical_count=%s "
+                        "batch_elapsed=%.1fs deficit_action=%s",
+                        batch_id,
+                        requested_batch_size,
+                        state["accepted"],
+                        state["attempt"],
+                        len(historical_questions),
+                        time.monotonic() - state["started_at"],
+                        deficit_action,
+                    )
+
+                if len(accepted_questions) == question_count:
+                    break
+
+    if len(accepted_questions) != question_count:
+        logger.error(
+                    "Quiz stream exhausted: requested=%s accepted=%s "
+                    "historical_count=%s elapsed=%.1fs",
+                    question_count,
+                    len(accepted_questions),
+                    len(historical_questions),
+                    time.monotonic() - stream_started_at,
+                )
+        raise LMStudioServiceError("Quiz soruları oluşturulamadı.")
+
+    total_elapsed = time.monotonic() - stream_started_at
+    performance_logger = logger.warning if total_elapsed > 120 else logger.info
+    performance_logger(
+        "Quiz performance requested=%s lm_calls=%s "
+        "replacements=%s total_elapsed=%.1fs",
+        question_count,
+        lm_call_count,
+        total_replacement_count,
+        total_elapsed,
+    )
+
+
+def generate_quiz(
+    text: str,
+    question_count: int = 10,
+    previous_questions: Optional[list[object]] = None,
+) -> QuizResponse:
+    questions = list(
+        generate_quiz_questions(
+            text,
+            question_count,
+            previous_questions=previous_questions,
+        )
+    )
+    return QuizResponse(questions=questions)
+
+
+def generate_flashcards(*args, **kwargs):
+    raise LMStudioServiceError(
+        "Flashcard oluşturma özelliği yeniden geliştiriliyor."
+    )
+
+
+def generate_study_recommendation(*args, **kwargs):
+    return None
+
+
+def ask_ai_about_document(*args, **kwargs):
+    raise LMStudioServiceError(
+        "PDF sohbet özelliği yeniden geliştiriliyor."
+    )
+
+
+def generate_study_plan(*args, **kwargs):
+    raise LMStudioServiceError(
+        "Çalışma planı özelliği yeniden geliştiriliyor."
+    )
+
+
+class PlannerServiceUnavailableError(Exception):
+    pass
