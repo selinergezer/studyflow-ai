@@ -9,7 +9,7 @@ from app.models.user import User
 from app.core.security import get_current_user
 
 from app.models.document import Document
-from app.services.ai_service import OllamaServiceError, generate_flashcards
+from app.services.ai_service import LMStudioServiceError, generate_flashcards
 
 from datetime import datetime, timedelta, timezone
 
@@ -203,13 +203,13 @@ def generate_flashcards_endpoint(
             "message": "Flashcard sayısı 1 ile 30 arasında olmalıdır."
         }
 
-    # Ollama ile flashcard oluştur
+    # LM Studio ile flashcard oluştur
     try:
         ai_result = generate_flashcards(
             document.text,
             flashcard_count
         )
-    except OllamaServiceError as error:
+    except LMStudioServiceError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
     created_flashcards = []
