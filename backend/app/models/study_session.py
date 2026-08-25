@@ -25,6 +25,12 @@ class StudySession(Base):
         nullable=False
     )
 
+    room_id = Column(
+    Integer,
+    ForeignKey("study_rooms.id"),
+    nullable=True
+)
+
     study_date = Column(
         Date,
         nullable=False
@@ -48,4 +54,8 @@ class StudySession(Base):
     course = relationship(
         "Course",
         back_populates="study_sessions"
+    )
+
+    room = relationship(
+    "StudyRoom"
     )
