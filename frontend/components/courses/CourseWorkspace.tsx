@@ -1,12 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiErrorMessage, apiFetch, isAbortError, type Course, type DocumentData } from "@/lib/api";
 import { useLanguage } from "@/providers/LanguageProvider";
 
 export default function CourseWorkspace({ courseId }: { courseId: number }) {
   const { t, language } = useLanguage();
+  const languageRef = useRef(language);
+
+  useEffect(() => {
+    languageRef.current = language;
+  }, [language]);
   const [course, setCourse] = useState<Course | null>(null);
   const [documents, setDocuments] = useState<DocumentData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -23,7 +28,7 @@ export default function CourseWorkspace({ courseId }: { courseId: number }) {
         const currentCourse = courseItems.find((item) => item.id === courseId) ?? null;
         setCourse(currentCourse);
         setDocuments(documentItems.filter((item) => item.course_id === courseId));
-        setError(currentCourse ? null : language === "tr" ? "Kurs bulunamadı." : "Course not found.");
+        setError(currentCourse ? null : languageRef.current === "tr" ? "Kurs bulunamadı." : "Course not found.");
       })
       .catch((cause) => {
         if (isAbortError(cause)) return;
@@ -34,7 +39,7 @@ export default function CourseWorkspace({ courseId }: { courseId: number }) {
       });
 
     return () => controller.abort();
-  }, [courseId, language]);
+  }, [courseId]);
 
   function documentId(document: DocumentData) {
     return document.id ?? document.document_id;

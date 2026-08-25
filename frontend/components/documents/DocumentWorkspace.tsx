@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Button from "@/components/ui/Button";
 import MarkdownSummary from "@/components/documents/MarkdownSummary";
 import QuizPanel from "@/components/documents/QuizPanel";
@@ -27,12 +27,19 @@ export default function DocumentWorkspace({
   initialFlashcardId?: number;
 }) {
   const { t, language } = useLanguage();
+  const languageRef = useRef(language);
+
+  useEffect(() => {
+    languageRef.current = language;
+  }, [language]);
 
   const [document, setDocument] = useState<DocumentData | null>(null);
   const [tab, setTab] = useState<Tab>(initialTab);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<"quiz" | "flashcards" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [summaryText, setSummaryText] = useState("");
+  const [summaryStreaming, setSummaryStreaming] = useState(false);
 
   const [flashcardCount, setFlashcardCount] = useState(10);
   const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
@@ -80,6 +87,14 @@ export default function DocumentWorkspace({
           JSON.stringify(normalized)
         );
 
+        setSummaryText(normalized.summary ?? "");
+
+        // Belge detayı hazır; ikincil quiz/flashcard koleksiyonları sayfanın
+        // görünmesini bloke etmesin.
+        if (!signal.aborted) {
+          setLoading(false);
+        }
+
         const [quizResult, flashcardResult] =
           await Promise.allSettled([
             apiFetch<Quiz[]>("/quizzes/", {
@@ -112,7 +127,7 @@ export default function DocumentWorkspace({
           initialTab === "quiz"
         ) {
           setError(
-            language === "tr"
+            languageRef.current === "tr"
               ? "Sınavlar şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin."
               : "Quizzes are currently unavailable. Please try again later."
           );
@@ -155,7 +170,7 @@ export default function DocumentWorkspace({
           initialTab === "flashcards"
         ) {
           setError(
-            language === "tr"
+            languageRef.current === "tr"
               ? "Bilgi kartları şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin."
               : "Flashcards are currently unavailable. Please try again later."
           );
@@ -163,7 +178,7 @@ export default function DocumentWorkspace({
       } catch (cause) {
         if (!isAbortError(cause)) {
           setError(
-            language === "tr"
+            languageRef.current === "tr"
               ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin."
               : "Data is currently unavailable. Please try again later."
           );
@@ -180,8 +195,8 @@ export default function DocumentWorkspace({
     return () => controller.abort();
   }, [
     documentId,
+    initialFlashcardId,
     initialTab,
-    language,
   ]);
 
   async function openQuiz(quiz: Quiz) {
@@ -293,7 +308,7 @@ export default function DocumentWorkspace({
     ) {
       setSelectedQuiz(null);
     }
-  } catch (cause) {
+  } catch {
     setError(
       language === "tr"
         ? "Sınav silinemedi."
@@ -357,6 +372,167 @@ export default function DocumentWorkspace({
       }
     }
   }
+  async function generateSummary() {
+  if (!document) return;
+
+  setSummaryStreaming(true);
+  setSummaryText("");
+  setError(null);
+
+  try {
+    const token = localStorage.getItem("access_token");
+
+    const response = await fetch(
+      `http://127.0.0.1:8000/documents/${documentId}/summary/stream`,
+      {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          ...(token
+            ? {
+                Authorization: `Bearer ${token}`,
+              }
+            : {}),
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        language === "tr"
+          ? "Özet oluşturma isteği başarısız oldu."
+          : "Summary generation request failed."
+      );
+    }
+
+    if (!response.body) {
+      throw new Error(
+        language === "tr"
+          ? "Özet akışı başlatılamadı."
+          : "Summary stream could not be started."
+      );
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    let buffer = "";
+    let streamedSummary = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+
+      if (done) break;
+
+      buffer += decoder.decode(value, {
+        stream: true,
+      });
+
+      const rawEvents = buffer.split("\n\n");
+      buffer = rawEvents.pop() ?? "";
+
+      for (const rawEvent of rawEvents) {
+        if (!rawEvent.trim()) continue;
+
+        let eventName = "";
+        let dataText = "";
+
+        for (const line of rawEvent.split("\n")) {
+          if (line.startsWith("event:")) {
+            eventName = line.slice(6).trim();
+          }
+
+          if (line.startsWith("data:")) {
+            dataText += line.slice(5).trim();
+          }
+        }
+
+        if (!dataText) continue;
+
+        let data: Record<string, unknown>;
+
+        try {
+          data = JSON.parse(dataText);
+        } catch {
+          continue;
+        }
+
+        if (eventName === "error") {
+          throw new Error(
+            typeof data.message === "string"
+              ? data.message
+              : language === "tr"
+              ? "Özet oluşturulurken hata oluştu."
+              : "An error occurred while creating the summary."
+          );
+        }
+
+        if (eventName === "done") {
+          continue;
+        }
+
+        const incomingText =
+          typeof data.text === "string"
+            ? data.text
+            : typeof data.content === "string"
+            ? data.content
+            : typeof data.token === "string"
+            ? data.token
+            : typeof data.chunk === "string"
+            ? data.chunk
+            : "";
+
+        if (!incomingText) continue;
+
+        streamedSummary += incomingText;
+        setSummaryText(streamedSummary);
+      }
+    }
+
+    const updatedDocument =
+      await apiFetch<DocumentData>(
+        `/documents/${documentId}`
+      );
+
+    const normalizedUpdatedDocument = {
+      ...updatedDocument,
+      document_id:
+        updatedDocument.document_id ??
+        updatedDocument.id,
+    };
+
+    setDocument(normalizedUpdatedDocument);
+
+    setSummaryText(
+      normalizedUpdatedDocument.summary ??
+        streamedSummary
+    );
+
+    localStorage.setItem(
+      "lastDocument",
+      JSON.stringify(
+        normalizedUpdatedDocument
+      )
+    );
+  } catch (cause) {
+    if (!isAbortError(cause)) {
+      console.error(
+        "Summary generation failed:",
+        cause
+      );
+
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : language === "tr"
+          ? "Özet oluşturulamadı."
+          : "Summary could not be generated."
+      );
+    }
+  } finally {
+    setSummaryStreaming(false);
+  }
+}
 
   async function generateFlashcards() {
     if (!document) return;
@@ -515,18 +691,70 @@ export default function DocumentWorkspace({
         />
 
         {tab === "summary" ? (
-          <article className="document-summary">
-            <p className="document-content-label">
-              {t(
-                "documentSummary"
-              )}
-            </p>
+  <article className="document-summary">
+    <p className="document-content-label">
+      {t("documentSummary")}
+    </p>
 
-            <MarkdownSummary>
-              {document.summary}
-            </MarkdownSummary>
-          </article>
+    {summaryText ? (
+      <>
+        <MarkdownSummary>
+          {summaryText}
+        </MarkdownSummary>
+
+        {summaryStreaming ? (
+          <p
+            style={{
+              marginTop: "18px",
+              opacity: 0.65,
+            }}
+          >
+            {language === "tr"
+              ? "Özet oluşturuluyor..."
+              : "Generating summary..."}
+          </p>
         ) : null}
+      </>
+    ) : (
+      <div
+        style={{
+          minHeight: "260px",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "18px",
+          textAlign: "center",
+        }}
+      >
+        <p
+          style={{
+            margin: 0,
+            opacity: 0.65,
+          }}
+        >
+          {language === "tr"
+            ? "Bu PDF için henüz bir özet oluşturulmadı."
+            : "A summary has not been created for this PDF yet."}
+        </p>
+
+        <Button
+          type="button"
+          onClick={generateSummary}
+          disabled={summaryStreaming}
+        >
+          {summaryStreaming
+            ? language === "tr"
+              ? "Özet oluşturuluyor..."
+              : "Generating summary..."
+            : language === "tr"
+            ? "Özet Oluştur →"
+            : "Create Summary →"}
+        </Button>
+      </div>
+    )}
+  </article>
+) : null}
 
         {tab === "quiz" ? (
           <section

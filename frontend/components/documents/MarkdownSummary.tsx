@@ -8,8 +8,16 @@ function inlineMarkdown(value: string): ReactNode[] {
   );
 }
 
-export default function MarkdownSummary({ children }: { children: string }) {
-  const lines = children.replace(/\\n/g, "\n").split(/\r?\n/);
+export default function MarkdownSummary({
+  children,
+}: {
+  children?: string | null;
+}) {
+  if (!children || typeof children !== "string") {
+    return null;
+  }
+
+  const lines = children.replace(/\r\n/g, "\n").split(/\r?\n/);
   const blocks: ReactNode[] = [];
 
   for (let index = 0; index < lines.length;) {

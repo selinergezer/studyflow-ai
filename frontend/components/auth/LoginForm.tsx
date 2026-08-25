@@ -1,11 +1,11 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ApiError,
   apiErrorMessage,
+  apiFetch,
   publicApiFetch,
 } from "@/lib/api";
 import { useLanguage } from "@/providers/LanguageProvider";
@@ -74,6 +74,18 @@ export default function LoginForm() {
       body,
     });
     localStorage.setItem("access_token", data.access_token);
+
+    // Route bundle hazırlanırken dashboard/layout verilerini paralel başlat.
+    // İlgili component'ler mount olduğunda apiFetch aynı pending request'leri
+    // paylaşır; burada ek ağ çağrısı oluşmaz.
+    void Promise.allSettled([
+      apiFetch("/users/me"),
+      apiFetch("/notifications/unread-count"),
+      apiFetch("/courses/"),
+      apiFetch("/documents/"),
+      apiFetch("/study-sessions/"),
+    ]);
+
     router.replace("/dashboard");
   }
 

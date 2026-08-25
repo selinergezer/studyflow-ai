@@ -11,7 +11,39 @@ const getRequestCache = new Map<
 
 const pendingGetRequests = new Map<string, Promise<unknown>>();
 
-const GET_CACHE_MS = 3000;
+// Sayfalar arasında geri/ileri giderken aynı koleksiyonları tekrar istemeyelim.
+// Tüm mutation'lar aşağıda cache'i temizlediği için bu süre veri yazmalarını
+// kullanıcıdan saklamaz.
+const GET_CACHE_MS = 30_000;
+
+const API_TIMING_STORAGE_KEY = "studyflow.apiTiming";
+
+type ApiRequestSource = "network" | "cache" | "deduped";
+
+function apiTimingEnabled() {
+  return (
+    process.env.NEXT_PUBLIC_API_TIMING === "true" ||
+    (typeof window !== "undefined" &&
+      window.localStorage.getItem(API_TIMING_STORAGE_KEY) === "true")
+  );
+}
+
+function logApiTiming(
+  method: string,
+  path: string,
+  startedAt: number,
+  source: ApiRequestSource,
+  status?: number,
+) {
+  if (!apiTimingEnabled()) return;
+
+  const duration = Math.round((performance.now() - startedAt) * 10) / 10;
+  const statusText = status == null ? "" : ` ${status}`;
+
+  console.info(
+    `[StudyFlow API] ${method} ${path}${statusText} ${duration}ms (${source})`,
+  );
+}
 
 export class ApiError extends Error {
   constructor(
@@ -145,6 +177,8 @@ export async function publicApiFetch<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
+  const startedAt = performance.now();
+  const method = (init.method ?? "GET").toUpperCase();
   const headers = new Headers(init.headers);
 
   if (
@@ -159,16 +193,27 @@ export async function publicApiFetch<T>(
     );
   }
 
-  const response = await safeFetch(path, {
-    ...init,
-    headers,
-  });
+  let response: Response;
 
-  if (!response.ok) {
-    throw await responseError(response);
+  try {
+    response = await safeFetch(path, {
+      ...init,
+      headers,
+    });
+  } catch (cause) {
+    logApiTiming(method, path, startedAt, "network");
+    throw cause;
   }
 
-  return response.json() as Promise<T>;
+  if (!response.ok) {
+    const error = await responseError(response);
+    logApiTiming(method, path, startedAt, "network", response.status);
+    throw error;
+  }
+
+  const data = (await response.json()) as T;
+  logApiTiming(method, path, startedAt, "network", response.status);
+  return data;
 }
 
 export async function apiFetch<T>(
@@ -212,6 +257,7 @@ export async function apiFetch<T>(
 
   if (method === "GET") {
     const cacheKey = `${token}:${path}`;
+    const startedAt = performance.now();
 
     const cached =
       getRequestCache.get(cacheKey);
@@ -220,6 +266,7 @@ export async function apiFetch<T>(
       cached &&
       cached.expiresAt > Date.now()
     ) {
+      logApiTiming(method, path, startedAt, "cache");
       return cached.data as T;
     }
 
@@ -227,7 +274,11 @@ export async function apiFetch<T>(
       pendingGetRequests.get(cacheKey);
 
     if (existingRequest) {
-      return existingRequest as Promise<T>;
+      try {
+        return (await existingRequest) as T;
+      } finally {
+        logApiTiming(method, path, startedAt, "deduped");
+      }
     }
 
     /*
@@ -238,24 +289,28 @@ export async function apiFetch<T>(
      * aktarmıyoruz. Bir component unmount olduğunda
      * diğer component'in isteğini iptal etmesin.
      */
-    const {
-      signal: _signal,
-      ...requestInit
-    } = init;
+    const requestInit = { ...init };
+    delete requestInit.signal;
 
     const request = (async () => {
-      const response = await safeFetch(
-        path,
-        {
+      let response: Response;
+
+      try {
+        response = await safeFetch(path, {
           ...requestInit,
           method,
           headers,
-        },
-      );
+        });
+      } catch (cause) {
+        logApiTiming(method, path, startedAt, "network");
+        throw cause;
+      }
 
       if (!response.ok) {
         const error =
           await responseError(response);
+
+        logApiTiming(method, path, startedAt, "network", response.status);
 
         if (response.status === 401) {
           localStorage.removeItem(
@@ -277,6 +332,8 @@ export async function apiFetch<T>(
 
       const data =
         (await response.json()) as T;
+
+      logApiTiming(method, path, startedAt, "network", response.status);
 
       getRequestCache.set(
         cacheKey,
@@ -308,18 +365,25 @@ export async function apiFetch<T>(
   // POST / PUT / PATCH / DELETE
   // =====================================================
 
-  const response = await safeFetch(
-    path,
-    {
+  const startedAt = performance.now();
+  let response: Response;
+
+  try {
+    response = await safeFetch(path, {
       ...init,
       method,
       headers,
-    },
-  );
+    });
+  } catch (cause) {
+    logApiTiming(method, path, startedAt, "network");
+    throw cause;
+  }
 
   if (!response.ok) {
     const error =
       await responseError(response);
+
+    logApiTiming(method, path, startedAt, "network", response.status);
 
     if (response.status === 401) {
       localStorage.removeItem(
@@ -346,10 +410,13 @@ export async function apiFetch<T>(
   getRequestCache.clear();
 
 if (response.status === 204) {
+  logApiTiming(method, path, startedAt, "network", response.status);
   return undefined as T;
 }
 
-return response.json() as Promise<T>;
+const data = (await response.json()) as T;
+logApiTiming(method, path, startedAt, "network", response.status);
+return data;
 }
 
 export type Course = {
