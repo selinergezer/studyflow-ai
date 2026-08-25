@@ -20,9 +20,11 @@ type Tab = "summary" | "quiz" | "flashcards";
 export default function DocumentWorkspace({
   documentId,
   initialTab = "summary",
+  initialFlashcardId,
 }: {
   documentId: string;
   initialTab?: Tab;
+  initialFlashcardId?: number;
 }) {
   const { t, language } = useLanguage();
 
@@ -116,17 +118,37 @@ export default function DocumentWorkspace({
           );
         }
 
-        if (
-          flashcardResult.status === "fulfilled"
-        ) {
-          setFlashcards(
-            flashcardResult.value.filter(
+        if (flashcardResult.status === "fulfilled") {
+  const documentFlashcards =
+    flashcardResult.value.filter(
+      (card) =>
+        card.document_id === Number(documentId)
+    );
+
+  setFlashcards(documentFlashcards);
+
+  if (initialFlashcardId != null) {
+    const selectedCard = documentFlashcards.find(
+      (card) => card.id === initialFlashcardId
+    );
+
+    if (selectedCard) {
+      const selectedBatchId =
+        selectedCard.batch_id;
+
+      const selectedBatch =
+        selectedBatchId
+          ? documentFlashcards.filter(
               (card) =>
-                card.document_id ===
-                Number(documentId)
+                card.batch_id === selectedBatchId
             )
-          );
-        } else if (
+          : [selectedCard];
+
+      setTab("flashcards");
+      setActiveFlashcards(selectedBatch);
+    }
+  }
+}else if (
           !isAbortError(
             flashcardResult.reason
           ) &&
