@@ -1,6 +1,8 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, and_
 
 from app.db.database import get_db
 from app.models.flashcard import Flashcard
@@ -10,6 +12,9 @@ from app.core.security import get_current_user
 
 from app.models.document import Document
 from app.services.ai_service import LMStudioServiceError, generate_flashcards
+from app.models.study_room import StudyRoom
+from app.models.study_room_member import StudyRoomMember
+from app.models.study_room_message import StudyRoomMessage
 
 from datetime import datetime, timedelta, timezone
 
@@ -24,7 +29,74 @@ router = APIRouter(
     prefix="/flashcards",
     tags=["Flashcards"]
 )
+def _get_accessible_flashcards(
+    db: Session,
+    current_user: User,
+    course_id: Optional[int] = None,
+):
+    # Kullanıcının Study Room'da erişebildiği flashcard ID'lerini bul
+    shared_flashcard_ids = (
+        db.query(StudyRoomMessage.material_id)
+        .join(
+            StudyRoomMember,
+            StudyRoomMember.room_id == StudyRoomMessage.room_id,
+        )
+        .join(
+            StudyRoom,
+            StudyRoom.id == StudyRoomMessage.room_id,
+        )
+        .filter(
+            StudyRoomMessage.material_type == "flashcard",
+            StudyRoomMessage.material_id.isnot(None),
+            StudyRoomMember.user_id == current_user.id,
+            StudyRoomMember.is_active == True,
+            StudyRoom.is_active == True,
+        )
+        .subquery()
+    )
 
+    # Paylaşılan flashcard'ların batch_id'lerini bul
+    shared_batch_ids = (
+        db.query(Flashcard.batch_id)
+        .filter(
+            Flashcard.id.in_(shared_flashcard_ids),
+            Flashcard.batch_id.isnot(None),
+        )
+        .subquery()
+    )
+
+    # Kullanıcının kendi kartları +
+    # Study Room'da paylaşılmış kartların bulunduğu
+    # batch'teki TÜM kartlar
+    query = (
+        db.query(Flashcard)
+        .outerjoin(
+            Course,
+            Flashcard.course_id == Course.id,
+        )
+        .filter(
+            or_(
+                # Kendi kartları
+                Course.user_id == current_user.id,
+
+                # Doğrudan paylaşılmış kart
+                Flashcard.id.in_(shared_flashcard_ids),
+
+                # Paylaşılan kartla aynı batch'teki tüm kartlar
+                and_(
+                    Flashcard.batch_id.isnot(None),
+                    Flashcard.batch_id.in_(shared_batch_ids),
+                ),
+            )
+        )
+    )
+
+    if course_id is not None:
+        query = query.filter(
+            Flashcard.course_id == course_id
+        )
+
+    return query.distinct().all()
 
 # =========================================================
 # MANUEL FLASHCARD OLUŞTURMA
@@ -82,44 +154,64 @@ def create_flashcard(
 @router.get("/")
 def get_flashcards(
     course_id: Optional[int] = None,
+    flashcard_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
 
-    query = (
+    if flashcard_id is not None:
+        selected_card = (
         db.query(Flashcard)
-        .join(
-            Course,
-            Flashcard.course_id == Course.id
-        )
-        .filter(
-            Course.user_id == current_user.id
-        )
+        .filter(Flashcard.id == flashcard_id)
+        .first()
     )
 
-    if course_id is not None:
-        query = query.filter(
-            Flashcard.course_id == course_id
+        if selected_card is None:
+           raise HTTPException(
+            status_code=404,
+            detail="Flashcard bulunamadı."
         )
 
-    flashcards = query.all()
+        accessible_flashcards = _get_accessible_flashcards(
+        db,
+        current_user,
+        None,
+        )
 
+        if selected_card.batch_id:
+            flashcards = [
+            card
+            for card in accessible_flashcards
+            if card.batch_id == selected_card.batch_id
+        ]
+        else:
+            flashcards = [
+            card
+            for card in accessible_flashcards
+            if card.id == selected_card.id
+        ]
+    else:
+        flashcards = _get_accessible_flashcards(
+        db,
+        current_user,
+        course_id,
+    )
     return [
-        {
-            "id": flashcard.id,
-            "question": flashcard.question,
-            "answer": flashcard.answer,
-            "course_id": flashcard.course_id,
-            "document_id": flashcard.document_id,
-            "created_at": flashcard.created_at,
-            "review_count": flashcard.review_count,
-            "correct_count": flashcard.correct_count,
-            "wrong_count": flashcard.wrong_count,
-            "next_review": flashcard.next_review
-        }
-        for flashcard in flashcards
-    ]
-
+    {
+        "id": flashcard.id,
+        "question": flashcard.question,
+        "answer": flashcard.answer,
+        "course_id": flashcard.course_id,
+        "document_id": flashcard.document_id,
+        "batch_id": flashcard.batch_id,
+        "created_at": flashcard.created_at,
+        "review_count": flashcard.review_count,
+        "correct_count": flashcard.correct_count,
+        "wrong_count": flashcard.wrong_count,
+        "next_review": flashcard.next_review
+    }
+    for flashcard in flashcards
+]
 
 # =========================================================
 # FLASHCARD SİL
@@ -214,30 +306,35 @@ def generate_flashcards_endpoint(
 
     created_flashcards = []
 
-    # Oluşturulan kartları veritabanına kaydet
+# Bu üretimde oluşturulan tüm kartlar aynı sete ait olacak
+    batch_id = str(uuid.uuid4())
+
+# Oluşturulan kartları veritabanına kaydet
     for item in ai_result.flashcards:
 
         flashcard = Flashcard(
-            question=item.question,
-            answer=item.answer,
-            course_id=course_id,
-            document_id=document_id
+        question=item.question,
+        answer=item.answer,
+        course_id=course_id,
+        document_id=document_id,
+        batch_id=batch_id,
         )
 
         db.add(flashcard)
         db.flush()
 
         created_flashcards.append({
-            "id": flashcard.id,
-            "question": flashcard.question,
-            "answer": flashcard.answer,
-            "course_id": flashcard.course_id,
-            "document_id": flashcard.document_id,
-            "review_count": flashcard.review_count,
-            "correct_count": flashcard.correct_count,
-            "wrong_count": flashcard.wrong_count,
-            "next_review": flashcard.next_review
-        })
+    "id": flashcard.id,
+    "question": flashcard.question,
+    "answer": flashcard.answer,
+    "course_id": flashcard.course_id,
+    "document_id": flashcard.document_id,
+    "batch_id": flashcard.batch_id,
+    "review_count": flashcard.review_count,
+    "correct_count": flashcard.correct_count,
+    "wrong_count": flashcard.wrong_count,
+    "next_review": flashcard.next_review
+})
 
     db.commit()
 

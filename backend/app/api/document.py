@@ -11,6 +11,9 @@ from app.models.document import Document
 from app.models.course import Course
 from app.models.user import User
 from app.core.security import get_current_user
+from app.models.study_room import StudyRoom
+from app.models.study_room_message import StudyRoomMessage
+from app.models.study_room_member import StudyRoomMember
 
 from app.services.pdf_service import extract_text_from_pdf
 from app.services.ai_service import LMStudioServiceError
@@ -21,7 +24,58 @@ router = APIRouter(
     prefix="/documents",
     tags=["Documents"]
 )
+def _get_accessible_document(
+    db: Session,
+    document_id: int,
+    current_user: User,
+):
+    document = (
+        db.query(Document)
+        .filter(Document.id == document_id)
+        .first()
+    )
 
+    if document is None:
+        return None
+
+    # Dokümanın sahibi ise erişebilir
+    owner = (
+        db.query(Course)
+        .filter(
+            Course.id == document.course_id,
+            Course.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if owner is not None:
+        return document
+
+    # Doküman bir Study Room'da paylaşılmış mı?
+    shared_room = (
+        db.query(StudyRoom)
+        .join(
+            StudyRoomMessage,
+            StudyRoomMessage.room_id == StudyRoom.id,
+        )
+        .join(
+            StudyRoomMember,
+            StudyRoomMember.room_id == StudyRoom.id,
+        )
+        .filter(
+            StudyRoomMessage.material_type == "document",
+            StudyRoomMessage.material_id == document_id,
+            StudyRoomMember.user_id == current_user.id,
+            StudyRoomMember.is_active == True,
+            StudyRoom.is_active == True,
+        )
+        .first()
+    )
+
+    if shared_room is not None:
+        return document
+
+    return None
 
 # =========================================================
 # PDF YÜKLE
@@ -103,15 +157,11 @@ def stream_document_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    document = (
-        db.query(Document)
-        .join(Course, Document.course_id == Course.id)
-        .filter(
-            Document.id == document_id,
-            Course.user_id == current_user.id
-        )
-        .first()
-    )
+    document = _get_accessible_document(
+    db,
+    document_id,
+    current_user,
+)
 
     if document is None:
         raise HTTPException(
@@ -225,15 +275,12 @@ def get_document(
     current_user: User = Depends(get_current_user)
 ):
 
-    document = (
-        db.query(Document)
-        .join(Course, Document.course_id == Course.id)
-        .filter(
-            Document.id == document_id,
-            Course.user_id == current_user.id
-        )
-        .first()
-    )
+    document = _get_accessible_document(
+    db,
+    document_id,
+    current_user,
+)
+    
 
     if document is None:
         raise HTTPException(

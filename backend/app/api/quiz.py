@@ -15,6 +15,9 @@ from app.models.document import Document
 from app.models.course import Course
 from app.models.user import User
 from app.models.achievement import Achievement
+from app.models.study_room import StudyRoom
+from app.models.study_room_member import StudyRoomMember
+from app.models.study_room_message import StudyRoomMessage
 
 from app.core.security import get_current_user
 from app.services.ai_service import (
@@ -55,6 +58,58 @@ def _is_correct_multiple_choice(
         and normalized_user_answer == normalized_correct_answer
     )
 
+def _get_accessible_quiz(
+    db: Session,
+    quiz_id: int,
+    current_user: User,
+):
+    # Önce quiz'i bul
+    quiz = (
+        db.query(Quiz)
+        .filter(Quiz.id == quiz_id)
+        .first()
+    )
+
+    if quiz is None:
+        return None
+
+    # Quiz sahibi ise doğrudan erişebilir
+    if (
+        db.query(Course)
+        .filter(
+            Course.id == quiz.course_id,
+            Course.user_id == current_user.id,
+        )
+        .first()
+        is not None
+    ):
+        return quiz
+
+    # Quiz bir Study Room'da paylaşılmış mı?
+    shared_room = (
+        db.query(StudyRoom)
+        .join(
+            StudyRoomMessage,
+            StudyRoomMessage.room_id == StudyRoom.id,
+        )
+        .join(
+            StudyRoomMember,
+            StudyRoomMember.room_id == StudyRoom.id,
+        )
+        .filter(
+            StudyRoomMessage.material_type == "quiz",
+            StudyRoomMessage.material_id == quiz_id,
+            StudyRoomMember.user_id == current_user.id,
+            StudyRoomMember.is_active == True,
+            StudyRoom.is_active == True,
+        )
+        .first()
+    )
+
+    if shared_room is not None:
+        return quiz
+
+    return None
 
 def _get_previous_document_questions(
     db: Session,
@@ -415,15 +470,11 @@ def get_quiz(
     current_user: User = Depends(get_current_user)
 ):
 
-    quiz = (
-        db.query(Quiz)
-        .join(Course, Quiz.course_id == Course.id)
-        .filter(
-            Quiz.id == quiz_id,
-            Course.user_id == current_user.id
-        )
-        .first()
-    )
+    quiz = _get_accessible_quiz(
+    db,
+    quiz_id,
+    current_user,
+)
 
     if quiz is None:
         raise HTTPException(status_code=404, detail="Quiz bulunamadı.")
@@ -463,15 +514,11 @@ def submit_quiz(
 ):
 
     # Quiz'i bul ve kullanıcının kendi quiz'i olduğunu kontrol et
-    quiz = (
-        db.query(Quiz)
-        .join(Course, Quiz.course_id == Course.id)
-        .filter(
-            Quiz.id == quiz_id,
-            Course.user_id == current_user.id
-        )
-        .first()
-    )
+    quiz = _get_accessible_quiz(
+    db,
+    quiz_id,
+    current_user,
+)
 
     if quiz is None:
         raise HTTPException(status_code=404, detail="Quiz bulunamadı.")
@@ -629,15 +676,11 @@ def get_quiz_attempts(
 ):
 
     # Quiz'i bul ve kullanıcının kendi quiz'i olduğunu kontrol et
-    quiz = (
-        db.query(Quiz)
-        .join(Course, Quiz.course_id == Course.id)
-        .filter(
-            Quiz.id == quiz_id,
-            Course.user_id == current_user.id
-        )
-        .first()
-    )
+    quiz = _get_accessible_quiz(
+    db,
+    quiz_id,
+    current_user,
+)
 
     if quiz is None:
         raise HTTPException(status_code=404, detail="Quiz bulunamadı.")

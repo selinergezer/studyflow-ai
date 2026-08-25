@@ -1,4 +1,4 @@
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+﻿from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextvars import ContextVar
 from difflib import SequenceMatcher
 import logging
@@ -24,7 +24,7 @@ LMSTUDIO_SUMMARY_MODEL = "gemma-3-12b-it-qat"
 
 # Quiz için kullandığımız model
 
-LMSTUDIO_QUIZ_MODEL = "qwen3-8b"
+LMSTUDIO_QUIZ_MODEL = "qwen/qwen3-8b"
 
 logger = logging.getLogger("uvicorn.error.studyflow.quiz")
 _quiz_validation_rejection_reason: ContextVar[Optional[str]] = ContextVar(
