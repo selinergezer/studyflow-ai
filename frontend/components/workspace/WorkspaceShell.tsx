@@ -27,6 +27,7 @@ const navigation = [
   { label: "quizzes", href: "/quiz" },
   { label: "flashcards", href: "/flashcards" },
   { label: "studyPlan", href: "/study-plan" },
+  { label: "studyRoom", href: "/study-room" },
 ] as const;
 
 export default function WorkspaceShell({
