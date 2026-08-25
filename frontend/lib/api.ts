@@ -364,6 +364,10 @@ export type CurrentUser = {
   email: string;
 };
 
+export async function getCurrentUser(): Promise<CurrentUser> {
+  return apiFetch<CurrentUser>("/users/me");
+}
+
 export type DocumentData = {
   id?: number;
   document_id?: number;
@@ -423,4 +427,171 @@ export async function deleteQuizApi(
   await apiFetch<void>(`/quizzes/${quizId}`, {
     method: "DELETE",
   });
+}
+
+export type StudyRoom = {
+  id: number;
+  name: string;
+  code: string;
+  course_id: number;
+  created_by: number;
+  is_active: boolean;
+  created_at: string;
+};
+
+export type StudyRoomMember = {
+  user_id: number;
+  username: string;
+  status: "studying" | "idle" | "offline";
+  joined_at: string;
+  study_started_at: string | null;
+};
+
+export type StudyRoomStats = {
+  room_id: number;
+  today_minutes: number;
+  total_minutes: number;
+  member_count: number;
+  currently_studying: number;
+};
+
+export type StudyRoomStartResponse = {
+  message: string;
+  room_id: number;
+  status: "studying";
+  study_started_at: string;
+};
+
+export type StudyRoomFinishResponse = {
+  message: string;
+  room_id: number;
+  duration_minutes: number;
+  status: "idle";
+  study_session_id: number;
+};
+
+export async function getMyStudyRooms(): Promise<StudyRoom[]> {
+  return apiFetch<StudyRoom[]>("/study-rooms/");
+}
+
+export async function getStudyRoomMembers(
+  roomId: number,
+): Promise<StudyRoomMember[]> {
+  return apiFetch<StudyRoomMember[]>(
+    `/study-rooms/${roomId}/members`,
+  );
+}
+
+export async function getStudyRoomStats(
+  roomId: number,
+): Promise<StudyRoomStats> {
+  return apiFetch<StudyRoomStats>(
+    `/study-rooms/${roomId}/stats`,
+  );
+}
+
+export async function startStudyRoom(
+  roomId: number,
+): Promise<StudyRoomStartResponse> {
+  return apiFetch<StudyRoomStartResponse>(
+    `/study-rooms/${roomId}/start`,
+    {
+      method: "POST",
+    },
+  );
+}
+
+export async function finishStudyRoom(
+  roomId: number,
+): Promise<StudyRoomFinishResponse> {
+  return apiFetch<StudyRoomFinishResponse>(
+    `/study-rooms/${roomId}/finish`,
+    {
+      method: "POST",
+    },
+  );
+}
+
+export async function createStudyRoom(
+  name: string,
+  courseId: number,
+): Promise<StudyRoom> {
+  return apiFetch<StudyRoom>("/study-rooms/", {
+    method: "POST",
+    body: JSON.stringify({
+      name,
+      course_id: courseId,
+    }),
+  });
+}
+
+export async function joinStudyRoom(
+  code: string,
+): Promise<StudyRoom> {
+  return apiFetch<StudyRoom>("/study-rooms/join", {
+    method: "POST",
+    body: JSON.stringify({
+      code,
+    }),
+  });
+}
+
+export async function getCourses(): Promise<Course[]> {
+  return apiFetch<Course[]>("/courses/");
+}
+
+export async function deleteStudyRoomApi(
+  roomId: number,
+): Promise<void> {
+  await apiFetch<void>(`/study-rooms/${roomId}`, {
+    method: "DELETE",
+  });
+}
+
+export type StudyRoomMessage = {
+  id: number;
+  room_id: number;
+  user_id: number;
+  username: string;
+  message: string;
+  material_type: "document" | "quiz" | "flashcard" | null;
+  material_id: number | null;
+  created_at: string;
+};
+export async function getDocuments(): Promise<DocumentData[]> {
+  return apiFetch<DocumentData[]>("/documents/");
+}
+
+export async function getQuizzes(): Promise<Quiz[]> {
+  return apiFetch<Quiz[]>("/quizzes/");
+}
+
+export async function getFlashcards(): Promise<Flashcard[]> {
+  return apiFetch<Flashcard[]>("/flashcards/");
+}
+export async function getStudyRoomMessages(
+  roomId: number,
+): Promise<StudyRoomMessage[]> {
+  return apiFetch<StudyRoomMessage[]>(
+    `/study-rooms/${roomId}/messages`,
+  );
+}
+
+export async function sendStudyRoomMessage(
+  roomId: number,
+  message: string,
+  materialType?: "document" | "quiz" | "flashcard",
+  materialId?: number,
+): Promise<StudyRoomMessage> {
+  return apiFetch<StudyRoomMessage>(
+    `/study-rooms/${roomId}/messages`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        message,
+        material_type: materialType ?? null,
+        material_id: materialId ?? null,
+      }),
+    },
+  );
 }
