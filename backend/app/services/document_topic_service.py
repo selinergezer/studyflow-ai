@@ -1147,7 +1147,7 @@ def generate_document_summary_stream(text: str):
     separated_chunks = set()
     emitted_section_titles = set()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor:
         futures = [
             executor.submit(
                 _stream_chunk_to_queue,
