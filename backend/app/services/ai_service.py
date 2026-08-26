@@ -24,7 +24,7 @@ LMSTUDIO_SUMMARY_MODEL = "gemma-3-12b-it-qat"
 
 # Quiz için kullandığımız model
 
-LMSTUDIO_QUIZ_MODEL = "qwen/qwen3-8b"
+LMSTUDIO_QUIZ_MODEL = "qwen3-8b"
 
 logger = logging.getLogger("uvicorn.error.studyflow.quiz")
 _quiz_validation_rejection_reason: ContextVar[Optional[str]] = ContextVar(
@@ -1584,11 +1584,67 @@ def _generate_valid_quiz_chunk(
     return valid_questions, len(raw_questions)
 
 
+def _generate_quiz_questions_production(
+    text: str,
+    question_count: int,
+    previous_questions: Optional[list[object]],
+):
+    from app.services.quiz_generation_service import (
+        LMStudioError as QuizGenerationError,
+        generate_production_quiz,
+        normalize_text as normalize_quiz_text,
+    )
+
+    previous_texts: set[str] = set()
+    for item in previous_questions or []:
+        if isinstance(item, dict):
+            value = item.get("question_text")
+        else:
+            value = getattr(item, "question_text", None)
+        if isinstance(value, str) and value.strip():
+            previous_texts.add(normalize_quiz_text(value))
+
+    labels = "ABCDE"
+    try:
+        for question in generate_production_quiz(
+            text,
+            question_count,
+            base_url=LMSTUDIO_BASE_URL,
+            model=LMSTUDIO_QUIZ_MODEL,
+            previous_question_texts=previous_texts,
+        ):
+            options = question.options
+            yield QuizQuestion(
+                question_type="multiple_choice",
+                context_text=None,
+                question_text=question.question_text,
+                option_a=options[0],
+                option_b=options[1],
+                option_c=options[2],
+                option_d=options[3],
+                option_e=options[4],
+                correct_answer=labels[question.correct_index],
+                explanation=(
+                    "Doğru cevap kaynak metindeki ilgili bilgiyle "
+                    "doğrudan desteklenmektedir."
+                ),
+            )
+    except QuizGenerationError as error:
+        raise LMStudioServiceError(str(error)) from error
+
+
 def generate_quiz_questions(
     text: str,
     question_count: int = 10,
     previous_questions: Optional[list[object]] = None,
 ):
+    yield from _generate_quiz_questions_production(
+        text,
+        question_count,
+        previous_questions,
+    )
+    return
+
     if not text or not text.strip():
         raise LMStudioServiceError("Quiz soruları oluşturulamadı.")
 
@@ -1767,6 +1823,13 @@ def generate_quiz_questions_stream(
     previous_questions: Optional[list[object]] = None,
 ):
     """Pipeline micro-batches concurrently and yield validated questions in order."""
+    yield from _generate_quiz_questions_production(
+        text,
+        question_count,
+        previous_questions,
+    )
+    return
+
     if not text or not text.strip():
         raise LMStudioServiceError("Quiz soruları oluşturulamadı.")
 
