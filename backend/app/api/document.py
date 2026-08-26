@@ -255,13 +255,34 @@ def get_documents(
 ):
 
     documents = (
-        db.query(Document)
+        db.query(
+            Document.id,
+            Document.filename,
+            Document.uploaded_at,
+            Document.course_id,
+            Document.page_count,
+        )
         .join(Course, Document.course_id == Course.id)
         .filter(Course.user_id == current_user.id)
         .all()
     )
 
-    return documents
+    return [
+        {
+            "id": document_id,
+            "filename": filename,
+            "uploaded_at": uploaded_at,
+            "course_id": course_id,
+            "page_count": page_count,
+        }
+        for (
+            document_id,
+            filename,
+            uploaded_at,
+            course_id,
+            page_count,
+        ) in documents
+    ]
 
 
 # =========================================================
