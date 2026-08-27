@@ -286,7 +286,8 @@ export default function WorkspaceShell({
     if (href === "/courses") {
       return (
         pathname === href ||
-        pathname.startsWith("/courses/")
+        pathname.startsWith("/courses/") ||
+        pathname.startsWith("/documents/")
       );
     }
 
@@ -338,6 +339,12 @@ export default function WorkspaceShell({
 
   const pageModifier = pathname === "/dashboard"
     ? " workspace-page--dashboard"
+    : pathname === "/courses"
+      ? " workspace-page--courses"
+    : pathname === "/quiz"
+      ? " workspace-page--quizzes"
+    : pathname.startsWith("/documents/")
+      ? " workspace-page--document"
     : pathname === "/library"
       ? " workspace-page--library"
       : pathname === "/upload"

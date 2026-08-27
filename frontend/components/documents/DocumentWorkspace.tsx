@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import Button from "@/components/ui/Button";
-import MarkdownSummary from "@/components/documents/MarkdownSummary";
+import SummaryNotebook from "@/components/documents/SummaryNotebook";
 import QuizPanel from "@/components/documents/QuizPanel";
 import FlashcardStudy from "@/components/documents/FlashcardStudy";
 import {
@@ -260,7 +261,6 @@ export default function DocumentWorkspace({
       normalized,
     ]);
 
-    setSelectedQuiz(normalized);
   }
 
   async function requestQuizDelete(
@@ -614,6 +614,13 @@ export default function DocumentWorkspace({
 
   return (
     <div className="document-detail-page">
+      <Link
+        className="document-detail-back"
+        href={`/courses/${document.course_id}`}
+      >
+        ← {language === "tr" ? "Kurslara dön" : "Back to courses"}
+      </Link>
+
       <header className="document-detail-heading">
         <div
           className="document-detail-glow"
@@ -677,9 +684,16 @@ export default function DocumentWorkspace({
         </p>
       ) : null}
 
-      <div
-        className={`document-paper document-paper-${tab}`}
-      >
+      {tab === "summary" ? (
+        <SummaryNotebook
+          key={summaryText}
+          summary={summaryText}
+          streaming={summaryStreaming}
+          language={language}
+          onGenerate={generateSummary}
+        />
+      ) : (
+      <div className={`document-paper document-paper-${tab}`}>
         <span
           className="document-paper-tape"
           aria-hidden="true"
@@ -689,72 +703,6 @@ export default function DocumentWorkspace({
           className="document-paper-holes"
           aria-hidden="true"
         />
-
-        {tab === "summary" ? (
-  <article className="document-summary">
-    <p className="document-content-label">
-      {t("documentSummary")}
-    </p>
-
-    {summaryText ? (
-      <>
-        <MarkdownSummary>
-          {summaryText}
-        </MarkdownSummary>
-
-        {summaryStreaming ? (
-          <p
-            style={{
-              marginTop: "18px",
-              opacity: 0.65,
-            }}
-          >
-            {language === "tr"
-              ? "Özet oluşturuluyor..."
-              : "Generating summary..."}
-          </p>
-        ) : null}
-      </>
-    ) : (
-      <div
-        style={{
-          minHeight: "260px",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: "18px",
-          textAlign: "center",
-        }}
-      >
-        <p
-          style={{
-            margin: 0,
-            opacity: 0.65,
-          }}
-        >
-          {language === "tr"
-            ? "Bu PDF için henüz bir özet oluşturulmadı."
-            : "A summary has not been created for this PDF yet."}
-        </p>
-
-        <Button
-          type="button"
-          onClick={generateSummary}
-          disabled={summaryStreaming}
-        >
-          {summaryStreaming
-            ? language === "tr"
-              ? "Özet oluşturuluyor..."
-              : "Generating summary..."
-            : language === "tr"
-            ? "Özet Oluştur →"
-            : "Create Summary →"}
-        </Button>
-      </div>
-    )}
-  </article>
-) : null}
 
         {tab === "quiz" ? (
           <section
@@ -792,6 +740,9 @@ export default function DocumentWorkspace({
                 documentId={
                   documentId
                 }
+                sourceName={
+                  document.filename
+                }
                 initialQuiz={
                   selectedQuiz
                 }
@@ -802,11 +753,27 @@ export default function DocumentWorkspace({
             </div>
 
             <aside className="document-quiz-history">
-              <p className="notebook-label">
-                {language === "tr"
-                  ? "ÖNCEKİ SINAVLAR"
-                  : "PREVIOUS QUIZZES"}
-              </p>
+              <header className="quiz-history-heading">
+                <div>
+                  <span>
+                    {language === "tr"
+                      ? "SINAV ARŞİVİ"
+                      : "QUIZ ARCHIVE"}
+                  </span>
+                  <h2>
+                    {language === "tr"
+                      ? "Önceki Sınavlar"
+                      : "Previous Quizzes"}
+                  </h2>
+                </div>
+
+                <strong>
+                  {quizzes.length}{" "}
+                  {language === "tr"
+                    ? "sınav"
+                    : "quizzes"}
+                </strong>
+              </header>
 
               {quizzes.length ? (
                 <div className="quiz-history-list">
@@ -1216,6 +1183,7 @@ export default function DocumentWorkspace({
           </section>
         ) : null}
       </div>
+      )}
     </div>
   );
 }

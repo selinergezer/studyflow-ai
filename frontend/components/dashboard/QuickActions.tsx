@@ -17,12 +17,12 @@ export default function QuickActions() {
       <div className="dashboard-actions-grid">
         {actions.map((action) => (
           <Link key={action.label} href={action.href} className={`dashboard-action-card dashboard-action-card--${action.accent} interactive-card`}>
-            <span className="dashboard-action-flag" aria-hidden="true" />
             <span className="dashboard-action-icon"><DashboardIcon name={action.icon} /></span>
-            <span>
+            <span className="dashboard-action-copy">
               <span className="dashboard-action-title">{t(action.label)}</span>
               <span className="dashboard-action-description">{t(action.description)}</span>
             </span>
+            <span className="dashboard-action-arrow" aria-hidden="true">→</span>
           </Link>
         ))}
       </div>

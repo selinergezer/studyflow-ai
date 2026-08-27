@@ -24,7 +24,7 @@ export function RecentCourses({ courses, documents, loading }: DashboardSectionP
         .reduce((latest, document) => Math.max(latest, document.uploaded_at ? Date.parse(document.uploaded_at) : (documentId(document) ?? 0)), 0);
       return latestDocument(b.id) - latestDocument(a.id) || b.id - a.id;
     })
-    .slice(0, 3);
+    .slice(0, 2);
 
   return (
     <section className="dashboard-section dashboard-panel" aria-labelledby="recent-courses-heading">
@@ -38,12 +38,16 @@ export function RecentCourses({ courses, documents, loading }: DashboardSectionP
             const count = documents.filter((document) => document.course_id === course.id).length;
             return (
               <Link key={course.id} href={`/courses/${course.id}`} className="dashboard-course-card interactive-card">
-                <span className="dashboard-course-tag">{t("course")}</span>
-                <span className="dashboard-course-icon"><DashboardIcon name="book" /></span>
-                <h3>{course.name}</h3>
-                {course.description ? <p className="dashboard-course-description">{course.description}</p> : <p className="dashboard-course-description">&nbsp;</p>}
-                <span className="dashboard-paper-rule" aria-hidden="true" />
-                <span className="dashboard-course-foot"><span>{count} {t("documentsCount")}</span><strong>{t("open")} →</strong></span>
+                <span className="dashboard-course-cover" aria-hidden="true">
+                  <span className="dashboard-course-cover-mark"><DashboardIcon name="book" /></span>
+                  <span className="dashboard-course-tag">{t("course")}</span>
+                </span>
+                <span className="dashboard-course-body">
+                  <h3>{course.name}</h3>
+                  {course.description ? <p className="dashboard-course-description">{course.description}</p> : <p className="dashboard-course-description">&nbsp;</p>}
+                  <span className="dashboard-paper-rule" aria-hidden="true" />
+                  <span className="dashboard-course-foot"><span><DashboardIcon name="book" /> {count} {t("documentsCount")}</span><strong>{t("open")} →</strong></span>
+                </span>
               </Link>
             );
           })}
@@ -78,7 +82,7 @@ export function RecentDocuments({ courses, documents, loading }: DashboardSectio
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
               </span>
               <span className="dashboard-document-info"><strong>{document.filename}</strong><small>{courseNames.get(document.course_id) ?? t("course")} · {document.page_count} {t("pages")}</small></span>
-              <span className="dashboard-document-open">{t("open")} →</span>
+              <span className="dashboard-document-open" aria-hidden="true">→</span>
             </Link>
           ))}
         </div>

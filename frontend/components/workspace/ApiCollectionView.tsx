@@ -23,6 +23,16 @@ type FlashcardDocumentCard = {
   flashcardCount: number;
 };
 
+function CollectionArtwork({ kind }: { kind: "quizzes" | "flashcards" }) {
+  return kind === "quizzes" ? <svg className="collection-artwork quiz-artwork" viewBox="0 0 390 220" fill="none" aria-hidden="true">
+    <circle cx="40" cy="54" r="5" className="quiz-art-dot"/><circle cx="344" cy="155" r="5" className="quiz-art-dot"/><path d="M20 117l10-14 8 9 14-20" className="quiz-art-squiggle"/>
+    <g className="quiz-art-donut" transform="rotate(-8 105 60)"><rect x="61" y="17" width="88" height="82" rx="17"/><circle cx="105" cy="57" r="24"/><path d="M105 33a24 24 0 0 1 23 17L105 57V33Z"/><path d="M105 57 89 75a24 24 0 0 1-8-18h24Z"/></g>
+    <g className="quiz-art-bars" transform="rotate(-7 82 150)"><rect x="45" y="108" width="82" height="78" rx="13"/><path d="M64 166v-25h10v25M84 166v-39h10v39M104 166v-53h10v53"/></g>
+    <g className="quiz-art-paper" transform="rotate(7 210 112)"><rect x="142" y="29" width="148" height="170" rx="17"/><path d="M175 62h72M173 79h91M170 108h70M168 126h87M165 155h77"/><circle cx="158" cy="75" r="9"/><path d="m154 75 4 4 7-9"/><circle cx="155" cy="110" r="9"/><circle cx="151" cy="146" r="9"/></g>
+    <g className="quiz-art-pencil" transform="rotate(8 300 115)"><path d="m261 171 76-113 15 10-79 111-19 9 7-17Z"/><path d="m337 58 7-11 15 10-7 11"/><path d="m254 188 7-17 12 8-19 9Z"/></g>
+  </svg> : <svg className="collection-artwork" viewBox="0 0 320 190" fill="none" aria-hidden="true"><rect className="collection-card-back" x="75" y="48" width="154" height="103" rx="17" transform="rotate(-9 75 48)"/><rect className="collection-card-front" x="103" y="30" width="154" height="105" rx="17" transform="rotate(7 103 30)"/><path d="M142 74h74M142 92h49"/><circle cx="220" cy="112" r="15"/><path d="M220 105v9M220 120h.01" strokeLinecap="round"/></svg>;
+}
+
 export default function ApiCollectionView({
   kind,
 }: {
@@ -58,6 +68,11 @@ export default function ApiCollectionView({
   const [questionCount, setQuestionCount] = useState(10);
   const [creatingQuiz, setCreatingQuiz] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [collectionQuery, setCollectionQuery] = useState("");
+  const [collectionView, setCollectionView] = useState<"grid" | "list">("grid");
+  const [collectionFilter, setCollectionFilter] = useState<"all" | "created">("all");
+  const [collectionSort, setCollectionSort] = useState<"newest" | "oldest">("newest");
+  const [quizMenuDocumentId, setQuizMenuDocumentId] = useState<number | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -240,6 +255,11 @@ export default function ApiCollectionView({
       })
       .filter(Boolean) as FlashcardDocumentCard[];
   }, [documents, flashcards]);
+
+  const visibleQuizDocuments = useMemo(() => quizDocuments.filter((document) => document.filename.toLocaleLowerCase(language === "tr" ? "tr-TR" : "en-US").includes(collectionQuery.trim().toLocaleLowerCase(language === "tr" ? "tr-TR" : "en-US"))).sort((a, b) => collectionSort === "newest" ? b.id - a.id : a.id - b.id), [collectionQuery, collectionSort, language, quizDocuments]);
+  const visibleFlashcardDocuments = useMemo(() => flashcardDocuments.filter((document) => document.filename.toLocaleLowerCase(language === "tr" ? "tr-TR" : "en-US").includes(collectionQuery.trim().toLocaleLowerCase(language === "tr" ? "tr-TR" : "en-US")) && (collectionFilter === "all" || document.flashcardCount > 0)).sort((a, b) => collectionSort === "newest" ? b.id - a.id : a.id - b.id), [collectionFilter, collectionQuery, collectionSort, flashcardDocuments, language]);
+  const totalQuestions = quizzes.reduce((total, quiz) => total + (quiz.question_count ?? 0), 0);
+  const totalCards = flashcards.length;
 
   const selectedDocument = documents.find(
     (document) =>
@@ -533,27 +553,30 @@ export default function ApiCollectionView({
   if (quizMode && selectedDocumentId === null) {
     return (
       <div className="quizzes-page">
-        <header className="quizzes-heading">
-          <div
-            className="quizzes-glow"
-            aria-hidden="true"
-          />
-
-          <div>
-            <p className="quizzes-eyebrow">
-              {t("practice")}
+        <header className="courses-hero quizzes-hero">
+          <div className="courses-hero-copy quizzes-hero-copy">
+            <p className="courses-eyebrow">
+              SINAVLAR
             </p>
 
             <h1>{t("quizzesTitle")}</h1>
 
-            <p className="quizzes-subtitle">
-              {t("quizzesIntro")}
+            <p className="courses-subtitle">
+              Ders materyallerinden odaklı sınavlar oluştur ve tekrar etmen gereken konuları takip et.
             </p>
+            <div className="courses-stats quizzes-stats">
+              <div><span>▤</span><strong>{quizzes.length}</strong><small>Toplam Sınav</small></div>
+              <div><span>?</span><strong>{totalQuestions}</strong><small>Toplam Soru</small></div>
+              <div><span>◎</span><strong>0%</strong><small>Ortalama Başarı</small></div>
+              <div><span>□</span><strong>0</strong><small>Bu Hafta</small></div>
+            </div>
           </div>
+
+          <div className="courses-hero-art quizzes-hero-art"><CollectionArtwork kind="quizzes" /></div>
 
           <Link
             href="/library?action=quiz"
-            className="quizzes-primary-button"
+            className="courses-primary-button"
           >
             <svg
               viewBox="0 0 24 24"
@@ -568,6 +591,12 @@ export default function ApiCollectionView({
           </Link>
         </header>
 
+        <div className="courses-toolbar quizzes-toolbar">
+          <label className="courses-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span className="sr-only">Sınav ara</span><input type="search" value={collectionQuery} onChange={(event) => setCollectionQuery(event.target.value)} placeholder="Sınav ara..." /></label>
+          <select className="courses-filter" value={collectionSort} onChange={(event) => setCollectionSort(event.target.value as "newest" | "oldest")} aria-label="Sınav sıralaması"><option value="newest">En Yeni</option><option value="oldest">En Eski</option></select>
+          <div className="courses-view-toggle" role="group" aria-label="Görünüm seç"><button type="button" className={collectionView === "grid" ? "active" : ""} onClick={() => setCollectionView("grid")} aria-label="Izgara görünümü">▦</button><button type="button" className={collectionView === "list" ? "active" : ""} onClick={() => setCollectionView("list")} aria-label="Liste görünümü">☰</button></div>
+        </div>
+
         {error ? (
           <p
             className="quizzes-error"
@@ -577,9 +606,9 @@ export default function ApiCollectionView({
           </p>
         ) : null}
 
-        {quizDocuments.length ? (
-          <div className="quizzes-grid">
-            {quizDocuments.map((document) => (
+        {visibleQuizDocuments.length ? (
+          <div className={`quizzes-grid collection-grid--${collectionView}`}>
+            {visibleQuizDocuments.map((document) => (
               <article
                 key={document.id}
                 className="quizzes-document-card"
@@ -605,45 +634,8 @@ export default function ApiCollectionView({
                   className="quizzes-card-flag"
                   aria-hidden="true"
                 />
-
-                <button
-                  type="button"
-                  disabled={
-                    deletingDocumentId === document.id
-                  }
-                  onClick={(event) =>
-                    deleteDocument(
-                      event,
-                      document.id,
-                    )
-                  }
-                  className="flashcards-delete quizzes-delete"
-                  aria-label={
-                    language === "tr"
-                      ? `${document.filename} dosyasını sil`
-                      : `Delete ${document.filename}`
-                  }
-                  title={
-                    language === "tr"
-                      ? "Sil"
-                      : "Delete"
-                  }
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M4 7h16" />
-                    <path d="M9 7V4h6v3" />
-                    <path d="m18 7-1 13H7L6 7" />
-                    <path d="M10 11v5" />
-                    <path d="M14 11v5" />
-                  </svg>
-                </button>
+                <span className={`quiz-status ${document.quizCount ? "is-ready" : "is-new"}`}>{document.quizCount ? "Hazır" : "Yeni"}</span>
+                <div className="quiz-card-menu"><button type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setQuizMenuDocumentId(quizMenuDocumentId === document.id ? null : document.id); }} aria-label={`${document.filename} menüsü`} aria-expanded={quizMenuDocumentId === document.id}>•••</button>{quizMenuDocumentId === document.id ? <div><button type="button" disabled={deletingDocumentId === document.id} onClick={(event) => deleteDocument(event, document.id)}>{deletingDocumentId === document.id ? "Siliniyor..." : "Belgeyi sil"}</button></div> : null}</div>
 
                 <span className="quizzes-card-icon">
                   <svg
@@ -658,6 +650,7 @@ export default function ApiCollectionView({
                 </span>
 
                 <h2>{document.filename}</h2>
+                <p className="quiz-card-meta">{document.quizCount ? `${document.quizCount} sınav hazır` : "Henüz sınav oluşturulmadı"}</p>
 
                 <span
                   className="quizzes-card-rule"
@@ -683,6 +676,7 @@ export default function ApiCollectionView({
                   </span>
 
                   <button
+                    className="quiz-open-button"
                     type="button"
                     onClick={(event) => {
                       event.preventDefault();
@@ -693,7 +687,7 @@ export default function ApiCollectionView({
                       );
                     }}
                   >
-                    {t("createQuizLower")}
+                    {document.quizCount ? "Sınavı Aç" : t("createQuizLower")} <span aria-hidden="true">→</span>
                   </button>
                 </div>
               </article>
@@ -954,15 +948,10 @@ export default function ApiCollectionView({
    */
   return (
     <div className="flashcards-page">
-      <header className="flashcards-heading">
-        <div
-          className="flashcards-glow"
-          aria-hidden="true"
-        />
-
-        <div>
+      <header className="flashcards-heading collection-hero">
+        <div className="collection-hero-copy">
           <p className="flashcards-eyebrow">
-            {t("review")}
+            BİLGİ KARTLARI
           </p>
 
           <h1>{t("flashcardsTitle")}</h1>
@@ -972,7 +961,13 @@ export default function ApiCollectionView({
               ? "Materyallerinden oluşturduğun kartlarla temel kavramları hızlıca tekrar et."
               : "Quickly review key concepts with cards created from your materials."}
           </p>
+          <div className="collection-stats">
+            <div><strong>{totalCards}</strong><span>Toplam Kart</span></div>
+            <div><strong>{flashcardDocuments.filter((item) => item.flashcardCount > 0).length}</strong><span>Kart Seti</span></div>
+          </div>
         </div>
+
+        <CollectionArtwork kind="flashcards" />
 
         <Link
           href="/library?action=flashcards"
@@ -991,6 +986,13 @@ export default function ApiCollectionView({
         </Link>
       </header>
 
+      <div className="collection-toolbar">
+        <label><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input type="search" value={collectionQuery} onChange={(event) => setCollectionQuery(event.target.value)} placeholder="Bilgi kartı ara..." /></label>
+        <select value={collectionFilter} onChange={(event) => setCollectionFilter(event.target.value as "all" | "created")} aria-label="Bilgi kartı filtresi"><option value="all">Tümü</option><option value="created">Oluşturduklarım</option></select>
+        <select value={collectionSort} onChange={(event) => setCollectionSort(event.target.value as "newest" | "oldest")} aria-label="Bilgi kartı sıralaması"><option value="newest">En Yeni</option><option value="oldest">En Eski</option></select>
+        <div className="collection-view-toggle"><button type="button" className={collectionView === "grid" ? "active" : ""} onClick={() => setCollectionView("grid")} aria-label="Izgara görünümü">▦</button><button type="button" className={collectionView === "list" ? "active" : ""} onClick={() => setCollectionView("list")} aria-label="Liste görünümü">☰</button></div>
+      </div>
+
       {error ? (
         <p
           className="flashcards-error"
@@ -1000,9 +1002,9 @@ export default function ApiCollectionView({
         </p>
       ) : null}
 
-      {flashcardDocuments.length ? (
-        <div className="flashcards-grid">
-          {flashcardDocuments.map(
+      {visibleFlashcardDocuments.length ? (
+        <div className={`flashcards-grid collection-grid--${collectionView}`}>
+          {visibleFlashcardDocuments.map(
             (document) => (
               <article
                 key={document.id}

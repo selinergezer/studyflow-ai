@@ -35,13 +35,29 @@ const optionKeys = [
 
 const letters = ["A", "B", "C", "D", "E"];
 
+const genericExplanationPatterns = [
+  /Doğru cevap kaynak metindeki ilgili bilgiyle doğrudan desteklenmektedir\.?/gi,
+  /The correct answer is directly supported by the relevant information in the source text\.?/gi,
+];
+
+function cleanQuizExplanation(explanation: string | null | undefined) {
+  if (!explanation) return "";
+
+  return genericExplanationPatterns
+    .reduce((text, pattern) => text.replace(pattern, ""), explanation)
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 export default function QuizPanel({
   documentId,
+  sourceName = "",
   initialQuiz,
   initialResult,
   onQuizCreated,
 }: {
   documentId: string;
+  sourceName?: string;
   initialQuiz?: Quiz | null;
   initialResult?: QuizResult | null;
   onQuizCreated?: (quiz: Quiz) => void;
@@ -355,9 +371,15 @@ export default function QuizPanel({
 
       setQuiz(created);
 
-      setQuestions(created.questions ?? []);
+      setQuestions((current) => {
+        const incoming = created?.questions ?? [];
+        if (!incoming.length) return current;
 
-      setCurrentQuestionIndex(0);
+        return incoming.map((question, index) => ({
+          ...current[index],
+          ...question,
+        }));
+      });
 
       setGenerationProgress({
         completed:
@@ -398,13 +420,13 @@ export default function QuizPanel({
 
     const firstUnansweredIndex =
       quiz.questions.findIndex(
-        (question) => !answers[question.id]
+        (_, index) => !answers[index]
       );
 
     if (firstUnansweredIndex >= 0) {
       const unansweredCount =
         quiz.questions.filter(
-          (question) => !answers[question.id]
+          (_, index) => !answers[index]
         ).length;
 
       setWarning(
@@ -445,14 +467,12 @@ export default function QuizPanel({
             body: JSON.stringify({
               answers:
                 quiz.questions.map(
-                  (question) => ({
+                  (question, index) => ({
                     question_id:
                       question.id,
 
                     answer:
-                      answers[
-                        question.id
-                      ],
+                      answers[index],
                   })
                 ),
             }),
@@ -531,11 +551,17 @@ export default function QuizPanel({
       <section className="document-quiz-panel is-setup">
         <div className="quiz-builder">
           <div className="quiz-builder-panel">
-            <p className="notebook-label">
+            <p className="quiz-landing-kicker">
               {tr
-                ? "SINAV HAZIRLA"
-                : "PREPARE A QUIZ"}
+                ? "YENİ SINAV"
+                : "NEW QUIZ"}
             </p>
+
+            <h2>
+              {tr
+                ? "Yeni Sınav Oluştur"
+                : "Create a New Quiz"}
+            </h2>
 
             <p className="quiz-builder-description">
               {tr
@@ -589,12 +615,7 @@ export default function QuizPanel({
             </Button>
 
             {busy ? (
-              <p
-                style={{
-                  marginTop: "12px",
-                  textAlign: "center",
-                }}
-              >
+              <p className="quiz-builder-progress">
                 {tr
                   ? `${generationProgress.completed} / ${generationProgress.total} soru hazırlandı`
                   : `${generationProgress.completed} / ${generationProgress.total} questions prepared`}
@@ -653,6 +674,9 @@ export default function QuizPanel({
         entry.question_id ===
         currentQuestion.id
     );
+  const reviewExplanation = cleanQuizExplanation(
+    currentResult?.explanation,
+  );
 
   // =====================================================
   // OPTIONS
@@ -715,10 +739,11 @@ export default function QuizPanel({
 
   function resultClass(
     question: QuizQuestion,
-    option: string
+    option: string,
+    questionIndex: number,
   ) {
     if (!result) {
-      return answers[question.id] === option
+      return answers[questionIndex] === option
         ? "selected"
         : "";
     }
@@ -752,301 +777,197 @@ export default function QuizPanel({
   // QUIZ EKRANI
   // =====================================================
 
+  const totalQuestions = Math.max(
+    questions.length,
+    generationProgress.total,
+    quiz?.question_count ?? 0,
+  );
+  const answeredCount = questions.filter((_, index) => {
+    const answer = answers[index];
+    return typeof answer === "string" && answer.trim().length > 0;
+  }).length;
+
   return (
-    <section className="document-quiz-panel has-quiz">
-      {busy && !quiz ? (
-        <div
-          className="quiz-message"
-          style={{
-            marginBottom: "16px",
-          }}
-        >
-          {tr
-            ? `Sınav hazırlanıyor... ${generationProgress.completed}/${generationProgress.total}`
-            : `Preparing quiz... ${generationProgress.completed}/${generationProgress.total}`}
-        </div>
-      ) : null}
+    <section className={`document-quiz-panel has-quiz ${result ? "is-reviewing" : ""}`}>
+      <div className="quiz-solving-layout">
+        <div className="quiz-question-notebook">
+          <div className="quiz-notebook-rings" aria-hidden="true">
+            {Array.from({ length: 13 }, (_, index) => <i key={index} />)}
+          </div>
 
-      {result ? (
-        <div className="quiz-result-summary">
-          <div>
-            <p className="notebook-label">
-              {tr
-                ? "SINAV SONUCU"
-                : "QUIZ RESULT"}
-            </p>
+          <div className="quiz-question-topline">
+            <span>{result ? (tr ? "Soru İnceleme" : "Question Review") : (tr ? "Sınav Modu: Tekrar Sınavı" : "Quiz Mode: Review Quiz")}</span>
 
-            <h2>
-              {result.correct} /{" "}
-              {result.total_questions}{" "}
-              <span>
+            {!result && !busy && quiz ? (
+              <button type="button" onClick={submitQuiz}>
+                {tr ? "Sınavı Bitir" : "Finish Quiz"}
+              </button>
+            ) : null}
+          </div>
+
+          {result ? (
+            <div className="quiz-result-summary">
+              <div>
+                <p className="notebook-label">{tr ? "SINAV SONUCU" : "QUIZ RESULT"}</p>
+                <h2>{result.correct} / {result.total_questions} <span>{tr ? "doğru" : "correct"}</span></h2>
+              </div>
+              <strong>%{result.score}</strong>
+              <div className="quiz-result-counts">
+                <span>✓ {result.correct} {tr ? "Doğru" : "Correct"}</span>
+                <span>✕ {result.wrong} {tr ? "Yanlış" : "Wrong"}</span>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="quiz-question-scroll">
+
+            {busy && !quiz ? (
+              <div className="quiz-message quiz-generation-message">
                 {tr
-                  ? "doğru"
-                  : "correct"}
+                  ? `Sınav hazırlanıyor... ${generationProgress.completed}/${generationProgress.total}`
+                  : `Preparing quiz... ${generationProgress.completed}/${generationProgress.total}`}
+              </div>
+            ) : null}
+
+            <div className="quiz-question-header">
+              <strong>{currentQuestionIndex + 1}. {tr ? "Soru" : "Question"} / {totalQuestions}</strong>
+            </div>
+
+            <h2 className="quiz-question-title">{currentQuestion.question_text}</h2>
+
+            {currentResult ? (
+              <p className={`quiz-answer-state ${currentResult.is_correct ? "correct" : "wrong"}`}>
+                {currentResult.is_correct ? (tr ? "✓ Doğru" : "✓ Correct") : (tr ? "✕ Yanlış" : "✕ Wrong")}
+              </p>
+            ) : null}
+
+            {currentQuestion.question_type === "classic" ? (
+              <textarea
+                className="quiz-classic-answer"
+                rows={6}
+                value={answers[currentQuestionIndex] ?? ""}
+                disabled={Boolean(result)}
+                placeholder={tr ? "Cevabını buraya yaz..." : "Write your answer here..."}
+                onChange={(event) => {
+                  setAnswers((current) => ({ ...current, [currentQuestionIndex]: event.target.value }));
+                  setWarning(null);
+                }}
+              />
+            ) : (
+              <div className="quiz-options">
+                {renderedOptions.map((option) => {
+                  const selected = answers[currentQuestionIndex] === option.value;
+
+                  return (
+                    <button
+                      type="button"
+                      key={option.key}
+                      disabled={Boolean(result)}
+                      className={`quiz-option ${resultClass(currentQuestion, option.value, currentQuestionIndex)}`}
+                      onClick={() => {
+                        setAnswers((current) => ({ ...current, [currentQuestionIndex]: option.value }));
+                        setWarning(null);
+                      }}
+                    >
+                      <strong className="quiz-option-badge">{option.letter || (option.value === "true" ? "D" : "Y")}</strong>
+                      <span>{option.label}</span>
+                      {selected ? <span className="quiz-option-check" aria-hidden="true">✓</span> : null}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {currentResult && !currentResult.is_correct ? (
+              <p className="quiz-correction">{tr ? "Doğru cevap" : "Correct answer"}: {currentResult.correct_answer}</p>
+            ) : null}
+
+            {reviewExplanation ? <p className="quiz-explanation">{reviewExplanation}</p> : null}
+            {warning ? <p className="quiz-message warning" role="alert">{warning}</p> : null}
+            {error ? <p className="quiz-message error" role="alert">{error}</p> : null}
+          </div>
+
+          <nav className="quiz-navigation" aria-label={tr ? "Sınav soruları" : "Quiz questions"}>
+            <button
+              type="button"
+              disabled={currentQuestionIndex === 0}
+              onClick={() => setCurrentQuestionIndex((index) => index - 1)}
+            >
+              ← {tr ? "Önceki Soru" : "Previous Question"}
+            </button>
+
+            {currentQuestionIndex < questions.length - 1 ? (
+              <button type="button" onClick={() => setCurrentQuestionIndex((index) => index + 1)}>
+                {tr ? "Sonraki Soru" : "Next Question"} →
+              </button>
+            ) : result ? (
+              <button type="button" onClick={restart}>{tr ? "Tekrar Çöz" : "Try Again"}</button>
+            ) : busy ? (
+              <span className="quiz-stream-waiting">
+                {tr
+                  ? `Yeni sorular hazırlanıyor... ${generationProgress.completed}/${generationProgress.total}`
+                  : `Preparing more questions... ${generationProgress.completed}/${generationProgress.total}`}
               </span>
-            </h2>
-          </div>
-
-          <strong>
-            %{result.score}
-          </strong>
-
-          <div className="quiz-result-counts">
-            <span>
-              ✓ {result.correct}{" "}
-              {tr
-                ? "Doğru"
-                : "Correct"}
-            </span>
-
-            <span>
-              ✕ {result.wrong}{" "}
-              {tr
-                ? "Yanlış"
-                : "Wrong"}
-            </span>
-          </div>
+            ) : (
+              <button type="button" className="finish-quiz" disabled={!quiz} onClick={submitQuiz}>
+                {tr ? "Sınavı Bitir" : "Finish Quiz"}
+              </button>
+            )}
+          </nav>
         </div>
-      ) : null}
 
-      <div className="quiz-question-header">
-        <span className="notebook-label">
-          {result
-            ? tr
-              ? "SORU İNCELEME"
-              : "QUESTION REVIEW"
-            : tr
-            ? "SINAV"
-            : "QUIZ"}
-        </span>
+        <aside className="quiz-solving-sidebar">
+          <section className="quiz-question-list-card">
+            <span className="quiz-card-tape quiz-card-tape--mint" aria-hidden="true" />
+            <h2>{tr ? "Soru Listesi" : "Question List"}</h2>
+            <div className="quiz-status-legend">
+              <span><i className="answered" />{tr ? "Cevaplandı" : "Answered"}</span>
+              <span><i />{tr ? "Cevaplanmadı" : "Unanswered"}</span>
+            </div>
+            <div className="quiz-question-jump-list">
+              {questions.map((question, index) => {
+                const answered = Boolean(answers[index]?.trim());
+                return (
+                  <button
+                    type="button"
+                    key={question.id ?? index}
+                    className={`${answered ? "answered" : ""} ${index === currentQuestionIndex ? "active" : ""}`}
+                    aria-current={index === currentQuestionIndex ? "step" : undefined}
+                    aria-label={`${index + 1}. ${tr ? "soru" : "question"}`}
+                    onClick={() => setCurrentQuestionIndex(index)}
+                  >
+                    {index + 1}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="quiz-answer-progress" aria-label={`${answeredCount} / ${totalQuestions}`}>
+              <span style={{ width: `${totalQuestions ? (answeredCount / totalQuestions) * 100 : 0}%` }} />
+            </div>
+            <small>{answeredCount} / {totalQuestions} {tr ? "Soru" : "Questions"}</small>
+          </section>
 
-        <span>
-          {currentQuestionIndex + 1} /{" "}
-          {questions.length}
-        </span>
+          <section className="quiz-info-card">
+            <span className="quiz-card-tape" aria-hidden="true" />
+            <h2>{tr ? "Sınav Bilgileri" : "Quiz Information"}</h2>
+            <dl>
+              <div><dt>{tr ? "Soru Sayısı" : "Questions"}</dt><dd>{totalQuestions}</dd></div>
+              {quiz?.created_at ? (
+                <div><dt>{tr ? "Oluşturulma" : "Created"}</dt><dd>{new Intl.DateTimeFormat(tr ? "tr-TR" : "en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(quiz.created_at))}</dd></div>
+              ) : null}
+              {sourceName ? (
+                <div><dt>{tr ? "Kaynak" : "Source"}</dt><dd title={sourceName}>{sourceName}</dd></div>
+              ) : null}
+            </dl>
+          </section>
+
+          {result ? (
+            <button type="button" className="quiz-create-another" onClick={createAnother}>
+              {tr ? "Yeni Sınav Oluştur" : "Create New Quiz"}
+            </button>
+          ) : null}
+        </aside>
       </div>
-
-      <h2 className="quiz-question-title">
-        {currentQuestionIndex + 1}.{" "}
-        {currentQuestion.question_text}
-      </h2>
-
-      {currentResult ? (
-        <p
-          className={`quiz-answer-state ${
-            currentResult.is_correct
-              ? "correct"
-              : "wrong"
-          }`}
-        >
-          {currentResult.is_correct
-            ? tr
-              ? "✓ Doğru"
-              : "✓ Correct"
-            : tr
-            ? "✕ Yanlış"
-            : "✕ Wrong"}
-        </p>
-      ) : null}
-
-      {currentQuestion.question_type ===
-      "classic" ? (
-        <textarea
-          className="quiz-classic-answer"
-          rows={6}
-          value={
-            answers[currentQuestion.id] ??
-            ""
-          }
-          disabled={Boolean(result)}
-          placeholder={
-            tr
-              ? "Cevabını buraya yaz..."
-              : "Write your answer here..."
-          }
-          onChange={(event) => {
-            setAnswers((current) => ({
-              ...current,
-              [currentQuestion.id]:
-                event.target.value,
-            }));
-
-            setWarning(null);
-          }}
-        />
-      ) : (
-        <div className="quiz-options">
-          {renderedOptions.map(
-            (option) => {
-              const selected =
-                answers[
-                  currentQuestion.id
-                ] === option.value;
-
-              return (
-                <button
-                  type="button"
-                  key={option.key}
-                  disabled={Boolean(result)}
-                  className={`quiz-option ${resultClass(
-                    currentQuestion,
-                    option.value
-                  )}`}
-                  onClick={() => {
-                    setAnswers(
-                      (current) => ({
-                        ...current,
-                        [currentQuestion.id]:
-                          option.value,
-                      })
-                    );
-
-                    setWarning(null);
-                  }}
-                >
-                  <span className="quiz-radio">
-                    {selected
-                      ? "●"
-                      : "○"}
-                  </span>
-
-                  {option.letter ? (
-                    <strong>
-                      {option.letter})
-                    </strong>
-                  ) : (
-                    <strong />
-                  )}
-
-                  <span>
-                    {option.label}
-                  </span>
-                </button>
-              );
-            }
-          )}
-        </div>
-      )}
-
-      {currentResult &&
-      !currentResult.is_correct ? (
-        <p className="quiz-correction">
-          {tr
-            ? "Doğru cevap"
-            : "Correct answer"}
-          :{" "}
-          {currentResult.correct_answer}
-        </p>
-      ) : null}
-
-      {currentResult?.explanation ? (
-        <p className="quiz-explanation">
-          {currentResult.explanation}
-        </p>
-      ) : null}
-
-      {warning ? (
-        <p
-          className="quiz-message warning"
-          role="alert"
-        >
-          {warning}
-        </p>
-      ) : null}
-
-      {error ? (
-        <p
-          className="quiz-message error"
-          role="alert"
-        >
-          {error}
-        </p>
-      ) : null}
-
-      <nav
-        className="quiz-navigation"
-        aria-label={
-          tr
-            ? "Sınav soruları"
-            : "Quiz questions"
-        }
-      >
-        <button
-          type="button"
-          disabled={currentQuestionIndex === 0}
-          onClick={() =>
-            setCurrentQuestionIndex(
-              (index) => index - 1
-            )
-          }
-        >
-          ←{" "}
-          {tr
-            ? "Önceki"
-            : "Previous"}
-        </button>
-
-        <span>
-          {currentQuestionIndex + 1} /{" "}
-          {questions.length}
-        </span>
-
-        {currentQuestionIndex <
-        questions.length - 1 ? (
-          <button
-            type="button"
-            onClick={() =>
-              setCurrentQuestionIndex(
-                (index) => index + 1
-              )
-            }
-          >
-            {tr
-              ? "Sonraki"
-              : "Next"}{" "}
-            →
-          </button>
-        ) : result ? (
-          <button
-            type="button"
-            onClick={restart}
-          >
-            {tr
-              ? "Tekrar Çöz"
-              : "Try Again"}
-          </button>
-        ) : busy ? (
-          <div className="quiz-stream-waiting">
-            {tr
-              ? `Yeni sorular hazırlanıyor... ${generationProgress.completed}/${generationProgress.total}`
-              : `Preparing more questions... ${generationProgress.completed}/${generationProgress.total}`}
-          </div>
-        ) : (
-          <button
-            type="button"
-            className="finish-quiz"
-            disabled={!quiz}
-            onClick={submitQuiz}
-          >
-            {tr
-              ? "Sınavı Tamamla"
-              : "Finish Quiz"}
-          </button>
-        )}
-      </nav>
-
-      {result ? (
-        <div className="quiz-result-actions">
-          <button
-            type="button"
-            onClick={createAnother}
-          >
-            {tr
-              ? "Yeni Sınav Oluştur"
-              : "Create New Quiz"}
-          </button>
-        </div>
-      ) : null}
     </section>
   );
 }
