@@ -311,7 +311,39 @@ def get_document(
 
     return document
 
+# ============================================================
+# TÜM YÜKLENEN İÇERİKLERİ TEMİZLE
+# ============================================================
 
+@router.delete("/clear")
+def clear_uploaded_content(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    documents = (
+        db.query(Document)
+        .join(Course, Document.course_id == Course.id)
+        .filter(
+            Course.user_id == current_user.id
+        )
+        .all()
+    )
+
+    deleted_count = 0
+
+    for document in documents:
+        if document.file_path and os.path.exists(document.file_path):
+            os.remove(document.file_path)
+
+        db.delete(document)
+        deleted_count += 1
+
+    db.commit()
+
+    return {
+        "message": "Yüklenen içerikler başarıyla temizlendi.",
+        "deleted_documents": deleted_count
+    }
 # =========================================================
 # PDF SİL
 # =========================================================

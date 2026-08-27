@@ -6,6 +6,8 @@ from app.db.database import get_db
 from app.models.study_session import StudySession
 from app.models.course import Course
 from app.models.user import User
+from app.models.quiz import Quiz
+from app.models.quiz_attempt import QuizAttempt
 
 from app.schemas.study_session import (
     StudySessionCreate,
@@ -207,7 +209,62 @@ def update_study_session(
 
     return study_session
 
+# ============================================================
+# ÇALIŞMA GEÇMİŞİNİ TEMİZLE
+# ============================================================
 
+@router.delete("/clear")
+def clear_study_history(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Kullanıcının çalışma kayıtlarını bul
+    study_sessions = (
+        db.query(StudySession)
+        .filter(
+            StudySession.user_id == current_user.id
+        )
+        .all()
+    )
+
+    # Kullanıcının kendi derslerine ait quizleri bul
+    user_quiz_ids = (
+        db.query(Quiz.id)
+        .join(Course, Quiz.course_id == Course.id)
+        .filter(
+            Course.user_id == current_user.id
+        )
+        .all()
+    )
+
+    quiz_ids = [quiz_id for (quiz_id,) in user_quiz_ids]
+
+    deleted_sessions = len(study_sessions)
+    deleted_attempts = 0
+
+    # Quiz sonuçlarını sil
+    if quiz_ids:
+        deleted_attempts = (
+            db.query(QuizAttempt)
+            .filter(
+                QuizAttempt.quiz_id.in_(quiz_ids)
+            )
+            .delete(
+                synchronize_session=False
+            )
+        )
+
+    # Çalışma kayıtlarını sil
+    for study_session in study_sessions:
+        db.delete(study_session)
+
+    db.commit()
+
+    return {
+        "message": "Çalışma geçmişi başarıyla temizlendi.",
+        "deleted_sessions": deleted_sessions,
+        "deleted_attempts": deleted_attempts
+    }
 # ============================================================
 # ÇALIŞMA OTURUMU SİL
 # ============================================================
@@ -240,3 +297,4 @@ def delete_study_session(
     return {
         "message": "Çalışma kaydı başarıyla silindi."
     }
+
