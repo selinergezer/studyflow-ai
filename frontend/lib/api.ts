@@ -1,5 +1,5 @@
 export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 const getRequestCache = new Map<
   string,
@@ -661,4 +661,16 @@ export async function sendStudyRoomMessage(
       }),
     },
   );
+}
+
+export async function clearStudyHistory(): Promise<void> {
+  await apiFetch<void>("/study-sessions/clear", {
+    method: "DELETE",
+  });
+}
+
+export async function clearUploadedContent(): Promise<void> {
+  await apiFetch<void>("/documents/clear", {
+    method: "DELETE",
+  });
 }

@@ -6,7 +6,14 @@ import Button from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
 import { useLanguage } from "@/providers/LanguageProvider";
 import type { TranslationKey } from "@/lib/translations";
-import { ApiError, apiErrorMessage, apiFetch, type CurrentUser } from "@/lib/api";
+import {
+  ApiError,
+  apiErrorMessage,
+  apiFetch,
+  clearStudyHistory,
+  clearUploadedContent,
+  type CurrentUser,
+} from "@/lib/api";
 
 type Theme = "light" | "dark";
 type Modal = "history" | "materials" | "profile" | "password" | null;
@@ -207,10 +214,30 @@ export default function SettingsView() {
   }
 }
 
-  function confirmModal() {
-    if (modal === "history" || modal === "materials") setNotice(t("requestConfirmed"));
-    setModal(null);
+  async function confirmModal() {
+  if (modal !== "history" && modal !== "materials") {
+    return;
   }
+
+  setModalError(null);
+
+  try {
+    if (modal === "history") {
+      await clearStudyHistory();
+    } else {
+      await clearUploadedContent();
+    }
+
+    setNotice(t("requestConfirmed"));
+    setModal(null);
+  } catch (error) {
+    setModalError(
+      error instanceof ApiError
+        ? apiErrorMessage(error)
+        : t("operationUnavailable"),
+    );
+  }
+}
 
   function logout() {
     localStorage.removeItem("access_token");
