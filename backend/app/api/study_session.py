@@ -207,6 +207,35 @@ def update_study_session(
 
     return study_session
 
+# ============================================================
+# TÜM ÇALIŞMA GEÇMİŞİNİ TEMİZLE
+# ============================================================
+
+@router.delete("/clear")
+def clear_study_history(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    sessions = (
+        db.query(StudySession)
+        .filter(
+            StudySession.user_id == current_user.id
+        )
+        .all()
+    )
+
+    deleted_count = len(sessions)
+
+    for session in sessions:
+        db.delete(session)
+
+    db.commit()
+
+    return {
+        "message": "Çalışma geçmişi başarıyla temizlendi.",
+        "deleted_sessions": deleted_count
+    }
+
 
 # ============================================================
 # ÇALIŞMA OTURUMU SİL
