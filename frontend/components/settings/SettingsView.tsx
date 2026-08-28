@@ -251,6 +251,10 @@ export default function SettingsView() {
         <p className="settings-eyebrow">{t("settings")}</p>
         <h1>{t("settings")}</h1>
         <p>{t("settingsIntro")}</p>
+        <button type="button" className="settings-page-logout" onClick={logout}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3M14 4h4a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3h-4" /></svg>
+          {language === "tr" ? "Çıkış Yap" : "Sign Out"}
+        </button>
       </header>
 
       <div className="settings-sections">
@@ -272,12 +276,6 @@ export default function SettingsView() {
           </SettingRow>
           {accountError ? <p className="py-4 text-sm text-red-600" role="alert">{accountError}</p> : null}
           {profileNotice ? <p className="py-4 text-sm text-green-600" role="status">{profileNotice}</p> : null}
-        </SettingsSection>
-
-        <SettingsSection title={language === "tr" ? "Oturum" : "Session"}>
-          <SettingRow title={language === "tr" ? "Oturumu kapat" : "Sign out"} description={language === "tr" ? "Bu cihazdaki mevcut oturumunuzu kapatın." : "End your current session on this device."}>
-            <Button className="settings-action-button settings-logout-button" variant="secondary" onClick={logout}>{language === "tr" ? "Çıkış Yap" : "Sign Out"}</Button>
-          </SettingRow>
         </SettingsSection>
 
         <SettingsSection title={t("language")}>

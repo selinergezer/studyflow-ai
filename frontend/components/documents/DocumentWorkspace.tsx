@@ -8,7 +8,9 @@ import QuizPanel from "@/components/documents/QuizPanel";
 import FlashcardStudy from "@/components/documents/FlashcardStudy";
 import {
   apiFetch,
+  API_URL,
   deleteQuizApi,
+  getToken,
   isAbortError,
   type DocumentData,
   type Flashcard,
@@ -17,6 +19,118 @@ import {
 import { useLanguage } from "@/providers/LanguageProvider";
 
 type Tab = "summary" | "quiz" | "flashcards";
+
+type FlashcardHistoryGroup = {
+  key: string;
+  cards: Flashcard[];
+  createdAt: number;
+  unresolvedLegacy: boolean;
+};
+
+const LEGACY_GENERATION_GAP_MS = 2_000;
+const SUPPORTED_FLASHCARD_SET_SIZES = new Set([5, 10, 15]);
+
+function flashcardCreatedAt(card: Flashcard): number | null {
+  if (!card.created_at) return null;
+
+  const timestamp = Date.parse(card.created_at);
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function groupFlashcardHistory(cards: Flashcard[]): FlashcardHistoryGroup[] {
+  const groups = new Map<string, Flashcard[]>();
+  const legacyCards: Flashcard[] = [];
+
+  for (const card of cards) {
+    if (!card.batch_id) {
+      legacyCards.push(card);
+      continue;
+    }
+
+    const key = `batch-${card.batch_id}`;
+    const group = groups.get(key) ?? [];
+    group.push(card);
+    groups.set(key, group);
+  }
+
+  const historyGroups: FlashcardHistoryGroup[] = Array.from(
+    groups,
+    ([key, batchCards]) => ({
+      key,
+      cards: batchCards,
+      createdAt: Math.max(
+        ...batchCards.map((card) => flashcardCreatedAt(card) ?? card.id),
+      ),
+      unresolvedLegacy: false,
+    }),
+  );
+
+  if (legacyCards.length) {
+    const timestampedLegacyCards = legacyCards
+      .map((card) => ({ card, timestamp: flashcardCreatedAt(card) }))
+      .sort(
+        (left, right) =>
+          (left.timestamp ?? left.card.id) -
+          (right.timestamp ?? right.card.id),
+      );
+    const hasCompleteTimestamps = timestampedLegacyCards.every(
+      ({ timestamp }) => timestamp !== null,
+    );
+    const legacyClusters: Flashcard[][] = [];
+
+    if (hasCompleteTimestamps) {
+      for (const item of timestampedLegacyCards) {
+        const currentCluster = legacyClusters.at(-1);
+        const previousCard = currentCluster?.at(-1);
+        const previousTimestamp = previousCard
+          ? flashcardCreatedAt(previousCard)
+          : null;
+
+        if (
+          !currentCluster ||
+          previousTimestamp === null ||
+          item.timestamp === null ||
+          item.timestamp - previousTimestamp > LEGACY_GENERATION_GAP_MS
+        ) {
+          legacyClusters.push([item.card]);
+        } else {
+          currentCluster.push(item.card);
+        }
+      }
+    }
+
+    const hasReliableLegacyBoundaries =
+      hasCompleteTimestamps &&
+      legacyClusters.length > 0 &&
+      legacyClusters.every((cluster) =>
+        SUPPORTED_FLASHCARD_SET_SIZES.has(cluster.length),
+      );
+
+    if (hasReliableLegacyBoundaries) {
+      legacyClusters.forEach((cluster, index) => {
+        historyGroups.push({
+          key: `legacy-generation-${flashcardCreatedAt(cluster[0])}-${index}`,
+          cards: cluster,
+          createdAt: Math.max(
+            ...cluster.map((card) => flashcardCreatedAt(card) ?? card.id),
+          ),
+          unresolvedLegacy: false,
+        });
+      });
+    } else {
+      historyGroups.push({
+        key: "legacy-unresolved",
+        cards: legacyCards,
+        createdAt: Math.max(
+          ...legacyCards.map((card) => flashcardCreatedAt(card) ?? card.id),
+        ),
+        unresolvedLegacy: true,
+      });
+    }
+  }
+
+  return historyGroups.sort((left, right) => right.createdAt - left.createdAt);
+}
 
 export default function DocumentWorkspace({
   documentId,
@@ -44,22 +158,14 @@ export default function DocumentWorkspace({
 
   const [flashcardCount, setFlashcardCount] = useState(10);
   const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
+  const [streamedFlashcards, setStreamedFlashcards] = useState<
+    Array<Pick<Flashcard, "question" | "answer">>
+  >([]);
+  const [flashcardStreamProgress, setFlashcardStreamProgress] = useState(0);
   const [activeFlashcards, setActiveFlashcards] =
     useState<Flashcard[] | null>(null);
 
-    const flashcardBatches = Array.from(
-  flashcards.reduce((groups, card) => {
-    const key = card.batch_id ?? `legacy-${card.id}`;
-
-    if (!groups.has(key)) {
-      groups.set(key, []);
-    }
-
-    groups.get(key)!.push(card);
-
-    return groups;
-  }, new Map<string, Flashcard[]>())
-);
+  const flashcardBatches = groupFlashcardHistory(flashcards);
 
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
   const [selectedQuiz, setSelectedQuiz] = useState<Quiz | null>(null);
@@ -539,32 +645,93 @@ export default function DocumentWorkspace({
 
     setBusy("flashcards");
     setError(null);
+    setStreamedFlashcards([]);
+    setFlashcardStreamProgress(0);
 
     try {
-      const data =
-        await apiFetch<{
-          flashcards: Flashcard[];
-        }>(
-          `/flashcards/generate?course_id=${document.course_id}&document_id=${documentId}&flashcard_count=${flashcardCount}`,
-          {
-            method: "POST",
-          }
-        );
-
-      setFlashcards((current) => [
-        ...current.filter(
-          (card) =>
-            !data.flashcards.some(
-              (created) =>
-                created.id === card.id
-            )
-        ),
-        ...data.flashcards,
-      ]);
-
-      setActiveFlashcards(
-        data.flashcards
+      const token = getToken();
+      const response = await fetch(
+        `${API_URL}/flashcards/generate/stream?course_id=${document.course_id}&document_id=${documentId}&flashcard_count=${flashcardCount}`,
+        {
+          headers: {
+            Accept: "text/event-stream",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+        },
       );
+      if (!response.ok || !response.body) {
+        throw new Error(
+          language === "tr"
+            ? "Bilgi kartı akışı başlatılamadı."
+            : "The flashcard stream could not be started.",
+        );
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let completed = false;
+
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+
+        for (const rawEvent of events) {
+          let eventName = "";
+          let dataText = "";
+          for (const line of rawEvent.split("\n")) {
+            if (line.startsWith("event:")) eventName = line.slice(6).trim();
+            if (line.startsWith("data:")) dataText += line.slice(5).trim();
+          }
+          if (!dataText) continue;
+          const data = JSON.parse(dataText) as Record<string, unknown>;
+
+          if (eventName === "error") {
+            throw new Error(
+              typeof data.message === "string"
+                ? data.message
+                : language === "tr"
+                  ? "Bilgi kartları tamamlanamadı."
+                  : "Flashcards could not be completed.",
+            );
+          }
+          if (
+            eventName === "flashcard" &&
+            typeof data.question === "string" &&
+            typeof data.answer === "string"
+          ) {
+            setStreamedFlashcards((current) => [
+              ...current,
+              { question: data.question as string, answer: data.answer as string },
+            ]);
+          }
+          if (eventName === "progress" && typeof data.completed === "number") {
+            setFlashcardStreamProgress(data.completed);
+          }
+          if (eventName === "completed" && Array.isArray(data.flashcards)) {
+            const savedCards = data.flashcards as Flashcard[];
+            setFlashcards((current) => [
+              ...savedCards,
+              ...current.filter(
+                (card) => !savedCards.some((created) => created.id === card.id),
+              ),
+            ]);
+            setFlashcardStreamProgress(savedCards.length);
+            completed = true;
+          }
+        }
+      }
+
+      if (!completed) {
+        throw new Error(
+          language === "tr"
+            ? "Bağlantı tamamlanmadan kapandı; kart seti kaydedilmedi."
+            : "The connection closed before completion; the set was not saved.",
+        );
+      }
     } catch (cause) {
       if (!isAbortError(cause)) {
         setError(
@@ -686,7 +853,6 @@ export default function DocumentWorkspace({
 
       {tab === "summary" ? (
         <SummaryNotebook
-          key={summaryText}
           summary={summaryText}
           streaming={summaryStreaming}
           language={language}
@@ -1009,6 +1175,7 @@ export default function DocumentWorkspace({
                               count
                             }
                             type="button"
+                            disabled={busy === "flashcards"}
                             className={
                               flashcardCount ===
                               count
@@ -1055,6 +1222,35 @@ export default function DocumentWorkspace({
                       ? "Bilgi Kartlarını Oluştur →"
                       : "Create Flashcards →"}
                   </Button>
+
+                  {busy === "flashcards" || streamedFlashcards.length ? (
+                    <div className="flashcard-stream-preview" aria-live="polite">
+                      <div className="flashcard-stream-head">
+                        <span>
+                          {language === "tr" ? "Canlı üretim" : "Live generation"}
+                        </span>
+                        <strong>
+                          {flashcardStreamProgress} / {flashcardCount}
+                        </strong>
+                      </div>
+                      <div className="flashcard-stream-track" aria-hidden="true">
+                        <i
+                          style={{
+                            width: `${Math.min(
+                              100,
+                              (flashcardStreamProgress / flashcardCount) * 100,
+                            )}%`,
+                          }}
+                        />
+                      </div>
+                      {streamedFlashcards.slice(-3).map((card, index) => (
+                        <p key={`${streamedFlashcards.length}-${index}-${card.question}`}>
+                          <span>{streamedFlashcards.length - Math.min(3, streamedFlashcards.length) + index + 1}.</span>
+                          {card.question}
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
 
                 <aside className="flashcard-history">
@@ -1072,11 +1268,10 @@ export default function DocumentWorkspace({
   }}
 >
     {flashcardBatches.map(
-      ([batchId, batchCards], index) => (
+      ({ key, cards: batchCards, unresolvedLegacy }, index) => (
         <article
-          key={batchId}
+          key={key}
           className="flashcard-history-card"
-          style={{ position: "relative" }}
         >
           <span
             className="flashcard-history-tape"
@@ -1084,9 +1279,21 @@ export default function DocumentWorkspace({
           />
 
           <h3>
-            {language === "tr"
-              ? `Kart Seti ${index + 1}`
-              : `Card Set ${index + 1}`}
+            {unresolvedLegacy
+              ? language === "tr"
+                ? "Eski Kartlar"
+                : "Legacy Cards"
+              : language === "tr"
+              ? `Kart Seti ${
+                  flashcardBatches
+                    .slice(0, index + 1)
+                    .filter((group) => !group.unresolvedLegacy).length
+                }`
+              : `Card Set ${
+                  flashcardBatches
+                    .slice(0, index + 1)
+                    .filter((group) => !group.unresolvedLegacy).length
+                }`}
           </h3>
 
           <p>
@@ -1097,65 +1304,45 @@ export default function DocumentWorkspace({
           </p>
 
           <div className="flashcard-history-actions">
-            <button
-              type="button"
-              onClick={() =>
-                setActiveFlashcards(batchCards)
-              }
-            >
-              {language === "tr"
-                ? "Tekrar Çalış →"
-                : "Study Again →"}
-            </button>
+            {unresolvedLegacy ? (
+              <span className="flashcard-history-legacy-note">
+                {language === "tr"
+                  ? "Set bilgisi bulunamadı"
+                  : "Set data unavailable"}
+              </span>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setActiveFlashcards(batchCards)}
+                >
+                  {language === "tr" ? "Tekrar Çalış →" : "Study Again →"}
+                </button>
 
-            <button
-              type="button"
-              className="flashcard-history-delete-btn"
-              style={{
-                position: "absolute",
-                top: "16px",
-                right: "16px",
-                width: "28px",
-                height: "28px",
-                padding: 0,
-                margin: 0,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                border: "none",
-                background: "transparent",
-                color: "#e76f61",
-                cursor: "pointer",
-                borderRadius: "6px",
-              }}
-              onClick={(event) =>
-                deleteFlashcardBatch(
-                  event,
-                  batchCards
-                )
-              }
-              aria-label={
-                language === "tr"
-                  ? "Kart setini sil"
-                  : "Delete card set"
-              }
-              title={
-                language === "tr"
-                  ? "Kart setini sil"
-                  : "Delete card set"
-              }
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                width="18"
-                height="18"
-              >
-                <path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" />
-              </svg>
-            </button>
+                <button
+                  type="button"
+                  className="flashcard-history-delete-btn"
+                  onClick={(event) => deleteFlashcardBatch(event, batchCards)}
+                  aria-label={
+                    language === "tr" ? "Kart setini sil" : "Delete card set"
+                  }
+                  title={
+                    language === "tr" ? "Kart setini sil" : "Delete card set"
+                  }
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    width="18"
+                    height="18"
+                  >
+                    <path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" />
+                  </svg>
+                </button>
+              </>
+            )}
           </div>
         </article>
       )

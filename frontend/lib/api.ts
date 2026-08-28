@@ -615,6 +615,10 @@ export async function deleteStudyRoomApi(
   });
 }
 
+export async function leaveStudyRoom(roomId: number): Promise<void> {
+  await apiFetch<void>(`/study-rooms/${roomId}/leave`, { method: "POST" });
+}
+
 export type StudyRoomMessage = {
   id: number;
   room_id: number;
@@ -623,6 +627,9 @@ export type StudyRoomMessage = {
   message: string;
   material_type: "document" | "quiz" | "flashcard" | null;
   material_id: number | null;
+  material_title: string | null;
+  material_count: number | null;
+  material_document_id: number | null;
   created_at: string;
 };
 export async function getDocuments(): Promise<DocumentData[]> {
