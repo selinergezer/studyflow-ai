@@ -1,5 +1,7 @@
 import json
+import logging
 import re
+import time
 from typing import Literal, Optional
 
 import httpx
@@ -525,6 +527,113 @@ class FlashcardItem(BaseModel):
 class FlashcardResponse(BaseModel):
     flashcards: list[FlashcardItem]
 
+
+_flashcard_logger = logging.getLogger(
+    "uvicorn.error.studyflow.flashcards"
+)
+_FLASHCARD_MAX_REFILLS = 2
+_FLASHCARD_MAX_QUESTION_LENGTH = 500
+_FLASHCARD_MAX_ANSWER_LENGTH = 2000
+
+
+def _extract_complete_json_objects(
+    buffer: str,
+) -> tuple[list[str], str]:
+    """
+    Stream buffer'ındaki tamamlanmış üst seviye JSON objelerini ayırır.
+
+    String içindeki süslü parantezleri ve escape edilmiş tırnakları JSON
+    sınırı olarak değerlendirmez. Tamamlanmamış son obje sonraki chunk için
+    buffer'da tutulur.
+    """
+    objects: list[str] = []
+    object_start: Optional[int] = None
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index, character in enumerate(buffer):
+        if object_start is None:
+            if character == "{":
+                object_start = index
+                depth = 1
+                in_string = False
+                escaped = False
+            continue
+
+        if escaped:
+            escaped = False
+            continue
+
+        if in_string and character == "\\":
+            escaped = True
+            continue
+
+        if character == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                objects.append(
+                    buffer[object_start:index + 1]
+                )
+                object_start = None
+
+    remainder = (
+        buffer[object_start:]
+        if object_start is not None
+        else ""
+    )
+    return objects, remainder
+
+
+def _normalize_flashcard_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _validate_streamed_flashcard(
+    value: object,
+    seen_questions: set[str],
+) -> Optional[FlashcardItem]:
+    if not isinstance(value, dict):
+        return None
+
+    question = value.get("question")
+    answer = value.get("answer")
+
+    if not isinstance(question, str) or not isinstance(answer, str):
+        return None
+
+    question = _normalize_flashcard_text(question)
+    answer = _normalize_flashcard_text(answer)
+
+    if not question or not answer:
+        return None
+
+    if (
+        len(question) > _FLASHCARD_MAX_QUESTION_LENGTH
+        or len(answer) > _FLASHCARD_MAX_ANSWER_LENGTH
+    ):
+        return None
+
+    question_key = question.casefold()
+    if question_key in seen_questions:
+        return None
+
+    seen_questions.add(question_key)
+    return FlashcardItem(
+        question=question,
+        answer=answer,
+    )
+
+
 def generate_flashcards_stream(
     text: str,
     flashcard_count: int = 10,
@@ -567,78 +676,122 @@ def generate_flashcards_stream(
             + end_chunk
         )
 
-    prompt = f"""
+    started_at = time.perf_counter()
+    first_card_seconds: Optional[float] = None
+    accepted_cards: list[FlashcardItem] = []
+    seen_questions: set[str] = set()
+    rejected_cards = 0
+    lm_calls = 0
+    refill_calls = 0
+
+    try:
+        for call_index in range(_FLASHCARD_MAX_REFILLS + 1):
+            missing_count = flashcard_count - len(accepted_cards)
+            if missing_count <= 0:
+                break
+
+            if call_index > 0:
+                refill_calls += 1
+
+            lm_calls += 1
+            excluded_questions = "\n".join(
+                f"- {card.question}"
+                for card in accepted_cards
+            ) or "- None"
+
+            prompt = f"""
 /no_think
 
-Create EXACTLY {flashcard_count} high-quality flashcards from the course material below.
+Create EXACTLY {missing_count} high-quality flashcards from the course material.
 
 RULES:
 - Use ONLY information from the course material.
-- Do not invent or add outside information.
 - Write in the same language as the source material.
-- Create exactly {flashcard_count} flashcards.
-- Each flashcard must cover a different important concept.
-- Prefer important definitions, causes, effects, dates, people, events,
-  processes, comparisons and key facts.
+- Each card must cover a different important concept.
 - Questions must be clear, specific and suitable for exam preparation.
-- Avoid duplicate or nearly identical questions.
-- Avoid overly broad questions.
 - Answers must be concise and directly answer the question.
-- Avoid one-word answers unless the question specifically asks for a name,
-  date, or single fact.
-- When the source contains multiple important items, include the important
-  items instead of only one.
-- Return valid JSON only.
-- Do not use markdown or explanations outside the JSON.
+- Do not repeat any excluded question.
+- Output JSON Lines only: one complete JSON object per line.
+- Do not output an array, wrapper object, markdown, numbering or commentary.
+
+Each line must have exactly this shape:
+{{"question":"...","answer":"..."}}
+
+EXCLUDED QUESTIONS:
+{excluded_questions}
 
 COURSE MATERIAL:
-
 {context}
-
-Return ONLY:
-
-{{
-    "flashcards": [
-        {{
-            "question": "...",
-            "answer": "..."
-        }}
-    ]
-}}
 """
 
-    num_predict = min(
-        4000,
-        max(700, flashcard_count * 180),
-    )
+            buffer = ""
+            num_predict = min(
+                4000,
+                max(500, missing_count * 180),
+            )
 
-    raw_response = ""
+            for chunk in _generate_with_lmstudio_stream(
+                prompt,
+                num_predict=num_predict,
+                model=LMSTUDIO_SUMMARY_MODEL,
+            ):
+                buffer += chunk
+                raw_objects, buffer = (
+                    _extract_complete_json_objects(buffer)
+                )
 
-    for chunk in _generate_with_lmstudio_stream(
-        prompt,
-        num_predict=num_predict,
-        model=LMSTUDIO_SUMMARY_MODEL,
-    ):
-        raw_response += chunk
+                for raw_object in raw_objects:
+                    try:
+                        value = json.loads(raw_object)
+                    except json.JSONDecodeError:
+                        rejected_cards += 1
+                        continue
 
-    cleaned = _clean_json_response(raw_response)
+                    card = _validate_streamed_flashcard(
+                        value,
+                        seen_questions,
+                    )
+                    if card is None:
+                        rejected_cards += 1
+                        continue
 
-    try:
-        data = json.loads(cleaned)
-        result = FlashcardResponse.model_validate(data)
-    except (json.JSONDecodeError, ValueError) as error:
-        raise LMStudioServiceError(
-            "LM Studio geçerli Flashcard JSON'u döndürmedi."
-        ) from error
+                    accepted_cards.append(card)
+                    if first_card_seconds is None:
+                        first_card_seconds = (
+                            time.perf_counter() - started_at
+                        )
 
-    if len(result.flashcards) != flashcard_count:
-        raise LMStudioServiceError(
-            f"LM Studio {flashcard_count} yerine "
-            f"{len(result.flashcards)} flashcard oluşturdu."
+                    yield card
+
+                    if len(accepted_cards) >= flashcard_count:
+                        break
+
+                if len(accepted_cards) >= flashcard_count:
+                    break
+
+        if len(accepted_cards) != flashcard_count:
+            raise LMStudioServiceError(
+                f"LM Studio {flashcard_count} yerine "
+                f"{len(accepted_cards)} geçerli flashcard oluşturdu."
+            )
+    finally:
+        total_seconds = time.perf_counter() - started_at
+        _flashcard_logger.info(
+            "FLASHCARD PERF requested=%s first_card_seconds=%s "
+            "accepted_cards=%s rejected_cards=%s lm_calls=%s "
+            "refill_calls=%s total_seconds=%.3f",
+            flashcard_count,
+            (
+                f"{first_card_seconds:.3f}"
+                if first_card_seconds is not None
+                else "none"
+            ),
+            len(accepted_cards),
+            rejected_cards,
+            lm_calls,
+            refill_calls,
+            total_seconds,
         )
-
-    for card in result.flashcards:
-        yield card
 
 def generate_flashcards(
     text: str,
