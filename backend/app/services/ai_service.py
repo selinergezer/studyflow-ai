@@ -125,6 +125,7 @@ def _generate_with_lmstudio_stream(
     prompt: str,
     *,
     num_predict: int = 850,
+    model: Optional[str] = None,
 ):
     """
     Özet veya diğer LM Studio özelliklerinde kullanılabilecek
@@ -135,7 +136,7 @@ def _generate_with_lmstudio_stream(
     """
 
     payload = {
-        "model": LMSTUDIO_SUMMARY_MODEL,
+        "model": model or LMSTUDIO_SUMMARY_MODEL,
         "messages": [
             {
                 "role": "user",
@@ -516,13 +517,249 @@ def generate_quiz(
 # GEÇİCİ OLARAK DEVRE DIŞI AI ÖZELLİKLERİ
 # =========================================================
 
-def generate_flashcards(
-    *args,
-    **kwargs,
+class FlashcardItem(BaseModel):
+    question: str
+    answer: str
+
+
+class FlashcardResponse(BaseModel):
+    flashcards: list[FlashcardItem]
+
+def generate_flashcards_stream(
+    text: str,
+    flashcard_count: int = 10,
 ):
-    raise LMStudioServiceError(
-        "Flashcard oluşturma özelliği yeniden geliştiriliyor."
+    if not text or not text.strip():
+        raise ValueError(
+            "Flashcard oluşturmak için kaynak metin bulunamadı."
+        )
+
+    if flashcard_count < 1 or flashcard_count > 30:
+        raise ValueError(
+            "Flashcard sayısı 1 ile 30 arasında olmalıdır."
+        )
+
+    max_context_chars = 18000
+
+    if len(text) <= max_context_chars:
+        context = text
+    else:
+        chunk_size = max_context_chars // 3
+
+        start_chunk = text[:chunk_size]
+
+        middle_start = max(
+            0,
+            (len(text) // 2) - (chunk_size // 2),
+        )
+
+        middle_chunk = text[
+            middle_start:middle_start + chunk_size
+        ]
+
+        end_chunk = text[-chunk_size:]
+
+        context = (
+            start_chunk
+            + "\n\n--- MIDDLE SECTION ---\n\n"
+            + middle_chunk
+            + "\n\n--- FINAL SECTION ---\n\n"
+            + end_chunk
+        )
+
+    prompt = f"""
+/no_think
+
+Create EXACTLY {flashcard_count} high-quality flashcards from the course material below.
+
+RULES:
+- Use ONLY information from the course material.
+- Do not invent or add outside information.
+- Write in the same language as the source material.
+- Create exactly {flashcard_count} flashcards.
+- Each flashcard must cover a different important concept.
+- Prefer important definitions, causes, effects, dates, people, events,
+  processes, comparisons and key facts.
+- Questions must be clear, specific and suitable for exam preparation.
+- Avoid duplicate or nearly identical questions.
+- Avoid overly broad questions.
+- Answers must be concise and directly answer the question.
+- Avoid one-word answers unless the question specifically asks for a name,
+  date, or single fact.
+- When the source contains multiple important items, include the important
+  items instead of only one.
+- Return valid JSON only.
+- Do not use markdown or explanations outside the JSON.
+
+COURSE MATERIAL:
+
+{context}
+
+Return ONLY:
+
+{{
+    "flashcards": [
+        {{
+            "question": "...",
+            "answer": "..."
+        }}
+    ]
+}}
+"""
+
+    num_predict = min(
+        4000,
+        max(700, flashcard_count * 180),
     )
+
+    raw_response = ""
+
+    for chunk in _generate_with_lmstudio_stream(
+        prompt,
+        num_predict=num_predict,
+        model=LMSTUDIO_SUMMARY_MODEL,
+    ):
+        raw_response += chunk
+
+    cleaned = _clean_json_response(raw_response)
+
+    try:
+        data = json.loads(cleaned)
+        result = FlashcardResponse.model_validate(data)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise LMStudioServiceError(
+            "LM Studio geçerli Flashcard JSON'u döndürmedi."
+        ) from error
+
+    if len(result.flashcards) != flashcard_count:
+        raise LMStudioServiceError(
+            f"LM Studio {flashcard_count} yerine "
+            f"{len(result.flashcards)} flashcard oluşturdu."
+        )
+
+    for card in result.flashcards:
+        yield card
+
+def generate_flashcards(
+    text: str,
+    flashcard_count: int = 10,
+) -> FlashcardResponse:
+
+    if not text or not text.strip():
+        raise ValueError("Flashcard oluşturmak için kaynak metin bulunamadı.")
+
+    if flashcard_count < 1 or flashcard_count > 30:
+        raise ValueError("Flashcard sayısı 1 ile 30 arasında olmalıdır.")
+
+    max_context_chars = 18000
+
+    if len(text) <= max_context_chars:
+        context = text
+    else:
+        chunk_size = max_context_chars // 3
+
+        start_chunk = text[:chunk_size]
+
+        middle_start = max(
+            0,
+            (len(text) // 2) - (chunk_size // 2),
+        )
+        middle_chunk = text[
+            middle_start:middle_start + chunk_size
+        ]
+
+        end_chunk = text[-chunk_size:]
+
+        context = (
+            start_chunk
+            + "\n\n--- MIDDLE SECTION ---\n\n"
+            + middle_chunk
+            + "\n\n--- FINAL SECTION ---\n\n"
+            + end_chunk
+        )
+
+    schema = FlashcardResponse.model_json_schema()
+
+    prompt = f"""
+/no_think
+
+Create EXACTLY {flashcard_count} high-quality flashcards from the course material below.
+
+RULES:
+- Use ONLY information from the course material.
+- Do not invent or add outside information.
+- Write in the same language as the source material.
+- Create exactly {flashcard_count} flashcards.
+- Each flashcard must cover a different important concept.
+- Prefer important definitions, causes, effects, dates, people, events,
+  processes, comparisons and key facts.
+- Questions must be clear, specific and suitable for exam preparation.
+- Avoid duplicate or nearly identical questions.
+- Avoid overly broad questions.
+- Answers must be concise and directly answer the question.
+- Do not include unnecessary information.
+- Return valid JSON only.
+- Do not use markdown or explanations outside the JSON.
+- Prefer active-recall questions over simple recognition questions.
+- Avoid one-word answers unless the question specifically asks for a name, date, or single fact.
+- When the source contains multiple important items, include the important items instead of only one.
+- Answers should contain enough key information to fully answer the question.
+
+COURSE MATERIAL:
+
+{context}
+
+Return ONLY:
+
+{{
+    "flashcards": [
+        {{
+            "question": "...",
+            "answer": "..."
+        }}
+    ]
+}}
+"""
+
+    num_predict = min(
+    6000,
+    max(1200, flashcard_count * 300),
+)
+
+    raw_response = _generate_with_lmstudio(
+        prompt,
+        json_schema=schema,
+        num_predict=num_predict,
+        model=LMSTUDIO_QUIZ_MODEL,
+    )
+
+    try:
+        data = json.loads(raw_response)
+        result = FlashcardResponse.model_validate(data)
+
+    except (json.JSONDecodeError, ValueError) as error:
+        print("FLASHCARD RAW RESPONSE:")
+        print(raw_response)
+        print("FLASHCARD PARSE ERROR:")
+        print(repr(error))
+
+        raise LMStudioServiceError(
+        "LM Studio geçerli Flashcard JSON'u döndürmedi."
+        ) from error
+
+    if len(result.flashcards) != flashcard_count:
+        raise LMStudioServiceError(
+            f"Yapay zeka {flashcard_count} kart yerine "
+            f"{len(result.flashcards)} kart oluşturdu."
+        )
+
+    for card in result.flashcards:
+        if not card.question.strip() or not card.answer.strip():
+            raise LMStudioServiceError(
+                "Yapay zeka boş Flashcard alanı oluşturdu."
+            )
+
+    return result
 
 
 def generate_study_recommendation(
