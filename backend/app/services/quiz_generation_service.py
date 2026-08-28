@@ -4895,18 +4895,24 @@ def _production_batch(
 
 
 def _production_batch_plan(question_count: int) -> list[int]:
-    """Keep first-question latency low without creating tiny normal batches."""
-    if question_count <= 0:
-        return []
-    if question_count == 1:
-        return [1]
-    if question_count <= 5:
-        return [1, question_count - 1]
 
-    remaining = question_count - 1
-    batch_count = math.ceil(remaining / 4)
-    base, extra = divmod(remaining, batch_count)
-    return [1] + [base + (1 if index < extra else 0) for index in range(batch_count)]
+    """
+
+    Generate the initial quiz in a single LM Studio streaming request.
+
+    QuestionObjectStream emits each completed question immediately,
+
+    so a separate first-question batch is unnecessary.
+
+    Refill requests are used only for questions rejected by validation.
+
+    """
+
+    if question_count <= 0:
+
+        return []
+
+    return [question_count]
 
 
 def _refill_call_budget(question_count: int) -> int:
