@@ -500,6 +500,47 @@ def get_quiz(
         ]
     }
 
+# =========================================================
+# QUIZ DELETE
+# =========================================================
+
+@router.delete("/{quiz_id}")
+def delete_quiz(
+    quiz_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    quiz = _get_accessible_quiz(
+        db,
+        quiz_id,
+        current_user,
+    )
+
+    if quiz is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Quiz bulunamadı."
+        )
+
+    try:
+        db.delete(quiz)
+        db.commit()
+
+        return {
+            "message": "Quiz başarıyla silindi.",
+            "quiz_id": quiz_id
+        }
+
+    except SQLAlchemyError as error:
+        db.rollback()
+        logger.exception(
+            "Quiz deletion failed: quiz_id=%s",
+            quiz_id
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Quiz silinemedi."
+        ) from error
 
 # =========================================================
 # QUIZ SUBMIT
