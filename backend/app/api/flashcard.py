@@ -1,17 +1,24 @@
+import json
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_
 
-from app.db.database import get_db
+from app.db.database import SessionLocal, get_db
 from app.models.flashcard import Flashcard
 from app.models.course import Course
 from app.models.user import User
 from app.core.security import get_current_user
 
 from app.models.document import Document
-from app.services.ai_service import LMStudioServiceError, generate_flashcards
+from app.services.ai_service import (
+    LMStudioServiceError,
+    generate_flashcards,
+    generate_flashcards_stream,
+)
 from app.models.study_room import StudyRoom
 from app.models.study_room_member import StudyRoomMember
 from app.models.study_room_message import StudyRoomMessage
@@ -29,6 +36,14 @@ router = APIRouter(
     prefix="/flashcards",
     tags=["Flashcards"]
 )
+logger = logging.getLogger("uvicorn.error.studyflow.flashcards")
+
+
+def _flashcard_sse_event(event: str, data: dict) -> str:
+    payload = json.dumps(data, ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
 def _get_accessible_flashcards(
     db: Session,
     current_user: User,
@@ -253,6 +268,177 @@ def delete_flashcard(
 # =========================================================
 # AI FLASHCARD OLUŞTURMA
 # =========================================================
+
+@router.get("/generate/stream")
+def generate_flashcards_stream_endpoint(
+    course_id: int,
+    document_id: int,
+    flashcard_count: int = 10,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    document = (
+        db.query(Document)
+        .join(Course, Document.course_id == Course.id)
+        .filter(
+            Document.id == document_id,
+            Document.course_id == course_id,
+            Course.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Doküman bulunamadı.",
+        )
+
+    if not document.text or not document.text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Bu dokümanda işlenmiş metin bulunamadı.",
+        )
+
+    if flashcard_count not in {5, 10, 15}:
+        raise HTTPException(
+            status_code=400,
+            detail="Flashcard sayısı 5, 10 veya 15 olmalıdır.",
+        )
+
+    document_text = document.text
+    batch_id = str(uuid.uuid4())
+
+    def event_stream():
+        stream_db = SessionLocal()
+        generated_cards = []
+
+        try:
+            yield _flashcard_sse_event(
+                "status",
+                {
+                    "status": "started",
+                    "requested": flashcard_count,
+                    "batch_id": batch_id,
+                },
+            )
+
+            for card in generate_flashcards_stream(
+                document_text,
+                flashcard_count,
+            ):
+                generated_cards.append(card)
+                completed = len(generated_cards)
+
+                yield _flashcard_sse_event(
+                    "flashcard",
+                    {
+                        "question": card.question,
+                        "answer": card.answer,
+                        "index": completed,
+                        "batch_id": batch_id,
+                    },
+                )
+                yield _flashcard_sse_event(
+                    "progress",
+                    {
+                        "completed": completed,
+                        "total": flashcard_count,
+                    },
+                )
+
+            if len(generated_cards) != flashcard_count:
+                raise LMStudioServiceError(
+                    "İstenen sayıda bilgi kartı oluşturulamadı."
+                )
+
+            saved_cards = []
+
+            for item in generated_cards:
+                flashcard = Flashcard(
+                    question=item.question,
+                    answer=item.answer,
+                    course_id=course_id,
+                    document_id=document_id,
+                    batch_id=batch_id,
+                )
+                stream_db.add(flashcard)
+                saved_cards.append(flashcard)
+
+            stream_db.flush()
+
+            completed_cards = []
+            for flashcard in saved_cards:
+                stream_db.refresh(flashcard)
+                completed_cards.append(
+                    {
+                        "id": flashcard.id,
+                        "question": flashcard.question,
+                        "answer": flashcard.answer,
+                        "course_id": flashcard.course_id,
+                        "document_id": flashcard.document_id,
+                        "batch_id": flashcard.batch_id,
+                        "created_at": (
+                            flashcard.created_at.isoformat()
+                            if flashcard.created_at
+                            else None
+                        ),
+                    }
+                )
+
+            stream_db.commit()
+
+            yield _flashcard_sse_event(
+                "completed",
+                {
+                    "completed": len(completed_cards),
+                    "total": flashcard_count,
+                    "batch_id": batch_id,
+                    "flashcards": completed_cards,
+                },
+            )
+
+        except LMStudioServiceError:
+            stream_db.rollback()
+            logger.exception(
+                "Flashcard streaming generation failed: document_id=%s",
+                document_id,
+            )
+            yield _flashcard_sse_event(
+                "error",
+                {
+                    "message": (
+                        "Bilgi kartları tamamlanamadı; "
+                        "kart seti kaydedilmedi."
+                    )
+                },
+            )
+        except Exception:
+            stream_db.rollback()
+            logger.exception(
+                "Flashcard streaming transaction failed: document_id=%s",
+                document_id,
+            )
+            yield _flashcard_sse_event(
+                "error",
+                {
+                    "message": (
+                        "Bilgi kartları kaydedilemedi; "
+                        "kart seti oluşturulmadı."
+                    )
+                },
+            )
+        finally:
+            stream_db.close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 @router.post("/generate")
 def generate_flashcards_endpoint(
