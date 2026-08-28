@@ -733,7 +733,7 @@ COURSE MATERIAL:
             for chunk in _generate_with_lmstudio_stream(
                 prompt,
                 num_predict=num_predict,
-                model=LMSTUDIO_SUMMARY_MODEL,
+                model=LMSTUDIO_QUIZ_MODEL,
             ):
                 buffer += chunk
                 raw_objects, buffer = (
