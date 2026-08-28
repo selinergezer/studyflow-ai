@@ -1,0 +1,5 @@
+backend/.env
+backend/.venv/
+backend/uploads/
+.DS_Store
+studyflow_backup.sql
