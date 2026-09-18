@@ -2,13 +2,12 @@ import asyncio
 import json
 import os
 import shutil
-import threading
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.db.database import get_db, SessionLocal
+from app.db.database import get_db
 from app.models.document import Document
 from app.models.course import Course
 from app.models.user import User
@@ -18,8 +17,11 @@ from app.models.study_room_message import StudyRoomMessage
 from app.models.study_room_member import StudyRoomMember
 
 from app.services.pdf_service import extract_text_from_pdf
-from app.services.ai_service import LMStudioServiceError
-from app.services.document_topic_service import generate_document_summary_stream
+from app.services.summary_job_service import (
+    ensure_summary_job,
+    get_summary_job_state,
+    get_summary_job_snapshot,
+)
 
 
 router = APIRouter(
@@ -178,101 +180,35 @@ def stream_document_summary(
         )
 
     document_text = document.text
+    existing_summary = document.summary
 
     async def event_stream():
-        """Bridge the blocking LM Studio generator to SSE without blocking ASGI."""
-        event_loop = asyncio.get_running_loop()
-        output_queue = asyncio.Queue()
-        stop_requested = threading.Event()
-        stream_finished = object()
+        if existing_summary and existing_summary.strip():
+            yield _sse_event("token", {"text": existing_summary})
+            yield _sse_event("done", {"status": "completed"})
+            return
 
-        def enqueue_output(output):
-            if not stop_requested.is_set():
-                event_loop.call_soon_threadsafe(output_queue.put_nowait, output)
+        ensure_summary_job(document_id, document_text)
+        cursor = 0
 
-        def produce_summary():
-            stream_db = SessionLocal()
-            final_summary = None
+        while True:
+            events, cursor, status = get_summary_job_snapshot(
+                document_id,
+                cursor,
+            )
 
-            try:
-                # This generator performs blocking httpx streaming, Queue.get(),
-                # and document processing. The complete chain must stay off the
-                # FastAPI event loop.
-                for stream_event in generate_document_summary_stream(document_text):
-                    if stop_requested.is_set():
-                        return
-
-                    if stream_event["event"] == "complete":
-                        final_summary = stream_event["final_summary"]
-                        continue
-
-                    enqueue_output(_sse_event(
-                        stream_event["event"],
-                        stream_event["data"],
-                    ))
-
-                if not final_summary or not final_summary.strip():
-                    raise LMStudioServiceError("LM Studio boş özet oluşturdu.")
-
-                stream_document = (
-                    stream_db.query(Document)
-                    .filter(Document.id == document_id)
-                    .first()
+            for stream_event in events:
+                yield _sse_event(
+                    stream_event["event"],
+                    stream_event["data"],
                 )
 
-                if stream_document is None:
-                    raise ValueError("Document artık mevcut değil.")
+            if status in {"completed", "failed"}:
+                return
 
-                stream_document.summary = final_summary
-                stream_db.commit()
-                enqueue_output(_sse_event("done", {"status": "completed"}))
-
-            except (LMStudioServiceError, ValueError) as error:
-                stream_db.rollback()
-                print(f"ÖZETLEME STREAM HATASI: {repr(error)}", flush=True)
-                enqueue_output(_sse_event(
-                    "error",
-                    {
-                        "status": "failed",
-                        "message": "Özet oluşturulurken bir hata oluştu. Tekrar deneyebilirsiniz."
-                    },
-                ))
-
-            except Exception as error:
-                stream_db.rollback()
-                print(f"BEKLENMEYEN STREAM HATASI: {repr(error)}", flush=True)
-                enqueue_output(_sse_event(
-                    "error",
-                    {
-                        "status": "failed",
-                        "message": "Özet oluşturulurken bir hata oluştu. Tekrar deneyebilirsiniz."
-                    },
-                ))
-
-            finally:
-                stream_db.close()
-                enqueue_output(stream_finished)
-
-        producer_task = asyncio.create_task(asyncio.to_thread(produce_summary))
-
-        try:
-            while True:
-                output = await output_queue.get()
-
-                if output is stream_finished:
-                    break
-
-                yield output
-        finally:
-            stop_requested.set()
-
-            if not producer_task.done():
-                producer_task.cancel()
-
-            try:
-                await producer_task
-            except asyncio.CancelledError:
-                pass
+            # Polling is asynchronous; blocking LM Studio and document work run
+            # in the detached asyncio.to_thread worker owned by the registry.
+            await asyncio.sleep(0.1)
 
     return StreamingResponse(
         event_stream(),
@@ -282,6 +218,50 @@ def stream_document_summary(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/{document_id}/summary/status")
+def get_document_summary_status(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    document = _get_accessible_document(db, document_id, current_user)
+
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Document bulunamadı.",
+        )
+
+    has_summary = bool(document.summary and document.summary.strip())
+
+    if has_summary:
+        return {
+            "document_id": document_id,
+            "status": "completed",
+            "has_summary": True,
+        }
+
+    job = get_summary_job_state(document_id)
+
+    if job is None:
+        return {
+            "document_id": document_id,
+            "status": "not_started",
+            "has_summary": False,
+        }
+
+    response = {
+        "document_id": document_id,
+        "status": job["status"],
+        "has_summary": False,
+    }
+
+    if job["status"] == "failed" and job["error"]:
+        response["error"] = job["error"]
+
+    return response
 
 
 # =========================================================
