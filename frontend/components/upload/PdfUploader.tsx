@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import Button from "@/components/ui/Button";
 import { useLanguage } from "@/providers/LanguageProvider";
 import {
@@ -103,10 +104,6 @@ export default function PdfUploader({
       });
     return () => controller.abort();
   }, [initialCourseId]);
-
-  const selectedCourse = courses.find(
-    (course) => String(course.id) === courseId,
-  );
 
   function normalizedFilename(filename: string) {
     return filename.trim().toLocaleLowerCase("tr-TR");
@@ -268,91 +265,31 @@ export default function PdfUploader({
   }
 
   return (
-    <div className="upload-page relative mx-auto max-w-5xl px-5 sm:px-8">
-      {/* Glow */}
-      <div
-        className="pointer-events-none absolute -left-52 -top-40 h-[560px] w-[560px]"
-        style={{
-          background:
-            "radial-gradient(circle, rgba(232,163,61,.16) 0%, rgba(232,163,61,.055) 40%, transparent 70%)",
-        }}
-      />
+    <div className="upload-page">
+      <Link href="/dashboard" className="upload-back-link">← Geri Dön</Link>
 
-      {/* Başlık */}
-      <div className="upload-heading relative">
-        <div className="mb-4 flex items-center gap-3 font-mono text-xs tracking-[0.14em] text-[#7fe0c4]">
-          <span className="h-px w-6 bg-[#7fe0c4]" />
-          MATERYALLER
+      <header className="upload-heading">
+        <div>
+          <p className="upload-eyebrow">PDF YÜKLE</p>
+          <h1>PDF Yükle</h1>
+          <p className="upload-intro">
+            Ders notlarını veya PDF belgelerini yükle. İçerik analiz edilerek özet hazırlanır.
+          </p>
         </div>
+      </header>
 
-        <h1 className="font-[Bricolage_Grotesque] text-4xl font-semibold tracking-[-0.035em] text-[var(--heading)] sm:text-5xl">
-          PDF Analiz Et
-        </h1>
-
-        <p className="mt-4 max-w-2xl text-[15px] leading-7 text-[var(--text)]">
-          Özetler, sınavlar ve bilgi kartları oluşturmak için bir ders
-          belgesi yükle.
-        </p>
-      </div>
-
-      {/* Defter */}
-      <section
-        className="upload-notebook relative overflow-hidden rounded-md bg-[#ece5d3] text-[#241f13] shadow-[0_35px_70px_-38px_rgba(0,0,0,.9)]"
-        style={{
-          backgroundImage: `
-            linear-gradient(
-              to right,
-              transparent 62px,
-              rgba(190,75,70,.28) 62px,
-              rgba(190,75,70,.28) 63px,
-              transparent 63px
-            ),
-            repeating-linear-gradient(
-              to bottom,
-              transparent 0px,
-              transparent 31px,
-              rgba(80,110,145,.11) 32px
-            )
-          `,
-        }}
-      >
-        {/* Bant */}
-        <div className="absolute -top-1 right-16 h-7 w-24 rotate-2 bg-[#7fe0c4]/70 shadow-sm" />
-
-        <div className="upload-notebook-content px-7 sm:px-12 sm:pl-[92px]">
-          {/* Küçük başlık */}
-          <div className="upload-preparation-copy max-w-2xl">
-            <p className="font-mono text-[11px] font-bold tracking-[0.12em] text-[#7a6e4e]">
-              MATERYAL HAZIRLA
-            </p>
-
-            <p className="mt-3 text-sm leading-6 text-[#6f654c]">
-              PDF dosyanı hangi kurs için kullanacağını seç ve
-              materyalini çalışma alanına ekle.
-            </p>
+      <section className="upload-card">
+        <div className="upload-course-section">
+          <div className="upload-field-heading">
+            <label htmlFor="upload-course">Kurs</label>
+            <p>Bu belge hangi kursa eklenecek?</p>
           </div>
 
-          {/* Kurs */}
-          <div className="upload-course-section max-w-2xl">
-            <label
-              htmlFor="upload-course"
-              className="mb-2 block font-mono text-[10px] uppercase tracking-[0.1em] text-[#8a7d55]"
-            >
-              Kurs
-            </label>
-
-            {selectedCourse ? (
-              <p className="upload-selected-course">
-                {t("uploadSelectedCourse", { course: selectedCourse.name })}
-              </p>
-            ) : null}
-
-            <div className="upload-course-picker">
+          <div className="upload-course-picker">
               <select
                 id="upload-course"
                 value={courseId}
                 onChange={(event) => setCourseId(event.target.value)}
-                className="h-12 min-w-0 flex-1 rounded-lg border border-[#241f13]/15 bg-[#fffdf8]/60 px-4 text-sm text-[#241f13] outline-none transition focus:border-[#e8a33d] focus:ring-4 focus:ring-[#e8a33d]/10"
                 required
               >
                 <option value="">Kurs seçin</option>
@@ -374,150 +311,55 @@ export default function PdfUploader({
               >
                 <span aria-hidden="true">+</span> Yeni Kurs
               </button>
-            </div>
-          </div>
-
-          <input
-            ref={inputRef}
-            type="file"
-            accept="application/pdf,.pdf"
-            className="sr-only"
-            onChange={handleInput}
-            aria-label={t("choosePdfFile")}
-          />
-
-          {/* PDF seçilmediyse */}
-          {!file ? (
-            <div
-              onDragEnter={(event) => {
-                event.preventDefault();
-                setDragging(true);
-              }}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setDragging(true);
-              }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={handleDrop}
-              className={`upload-dropzone flex flex-col items-center justify-center rounded-lg border border-dashed px-6 text-center transition-all ${
-                dragging
-                  ? "scale-[1.005] border-[#e8a33d] bg-[#e8a33d]/10 shadow-[0_0_30px_rgba(232,163,61,.13)]"
-                  : "border-[#241f13]/25 bg-[#fffdf8]/25 hover:border-[#c07f28] hover:bg-[#fffdf8]/40"
-              }`}
-            >
-              <div className="upload-drop-icon flex size-12 items-center justify-center rounded-full bg-[#e8a33d]/15 text-[#b87521]">
-                <svg
-                  className="size-5"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M12 15V4" />
-                  <path d="M8 8l4-4 4 4" />
-                  <path d="M5 14v5h14v-5" />
-                </svg>
-              </div>
-
-              <h2 className="mt-5 font-[Bricolage_Grotesque] text-lg font-semibold">
-                {dragging
-                  ? "PDF dosyanı bırak"
-                  : "PDF dosyanı buraya bırak"}
-              </h2>
-
-              <p className="mt-2 text-sm text-[#8a7d55]">
-                veya bilgisayarından bir dosya seç
-              </p>
-
-              <button
-                type="button"
-                onClick={() => inputRef.current?.click()}
-                className="interactive-button interactive-button--secondary mt-6 rounded-lg border border-[#241f13]/20 bg-[#fffdf8]/55 px-5 py-2.5 text-sm font-semibold text-[#241f13]"
-              >
-                PDF Seç
-              </button>
-
-              <p className="mt-4 font-mono text-[9px] uppercase tracking-[0.08em] text-[#9a8f68]">
-                Yalnızca PDF dosyaları
-              </p>
-            </div>
-          ) : (
-            /* PDF seçildiyse */
-            <div className="upload-selected-file flex min-h-[220px] items-center justify-center rounded-lg border border-dashed border-[#241f13]/20 bg-[#fffdf8]/25 p-6">
-              <div className="flex w-full max-w-2xl items-center gap-4 rounded-lg border border-[#241f13]/15 bg-[#fffdf8]/55 p-5 shadow-sm">
-                <div className="flex size-14 shrink-0 items-center justify-center rounded-lg bg-[#e0786e]/15 font-mono text-xs font-bold text-[#bd564d]">
-                  PDF
-                </div>
-
-                <div className="min-w-0 flex-1">
-                  <p className="truncate font-[Bricolage_Grotesque] text-base font-semibold">
-                    {file.name}
-                  </p>
-
-                  <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.06em] text-[#8a7d55]">
-                    {formatBytes(file.size)} · PDF
-                  </p>
-
-                  <p className="mt-2 text-xs font-medium text-[#438c75]">
-                    Analiz için hazır
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={removeFile}
-                  disabled={isAnalyzing}
-                  className="flex size-9 shrink-0 items-center justify-center rounded-md text-[#8a7d55] transition hover:bg-[#241f13]/10 hover:text-[#bd564d]"
-                  aria-label={t("removeFile", {
-                    name: file.name,
-                  })}
-                >
-                  <svg
-                    className="size-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.7"
-                    strokeLinecap="round"
-                  >
-                    <path d="m6 6 12 12M18 6 6 18" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Hata */}
-          {error ? (
-            <div
-              className="mt-5 rounded-md border border-[#bd564d]/25 bg-[#bd564d]/10 px-4 py-3 text-sm text-[#9f4139]"
-              role="alert"
-            >
-              {error}
-            </div>
-          ) : null}
-
-          {/* Footer */}
-          <div className="upload-footer flex flex-col sm:flex-row sm:items-center sm:justify-between">
-            <p className="font-[Kalam] text-[15px] text-[#857951]">
-              <span className="text-[#c07f28]">not:</span>{" "}
-              PDF yüklendikten sonra özet otomatik hazırlanır.
-            </p>
-
-            <button
-              type="button"
-              onClick={analyzePdf}
-              disabled={!file || !courseId || isAnalyzing}
-              className="interactive-button inline-flex min-w-[190px] items-center justify-center gap-2 rounded-lg bg-[#e8a33d] px-5 py-3 text-sm font-bold text-[#241705] shadow-[0_14px_28px_-14px_rgba(232,163,61,.75)] disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {isAnalyzing
-                ? "PDF analiz ediliyor..."
-                : "PDF’yi Analiz Et →"}
-            </button>
           </div>
         </div>
+
+        <input ref={inputRef} type="file" accept="application/pdf,.pdf" className="sr-only" onChange={handleInput} aria-label={t("choosePdfFile")} />
+
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => inputRef.current?.click()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") inputRef.current?.click();
+          }}
+          onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
+          onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={handleDrop}
+          className={`upload-dropzone${dragging ? " is-dragging" : ""}`}
+        >
+          <span className="upload-drop-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 15V4" /><path d="M8 8l4-4 4 4" /><path d="M5 14v5h14v-5" />
+            </svg>
+          </span>
+          <h2>{dragging ? "PDF dosyanı bırak" : "PDF dosyanı buraya sürükle veya tıkla"}</h2>
+          <p>Sadece PDF dosyaları</p>
+          <button type="button" onClick={(event) => { event.stopPropagation(); inputRef.current?.click(); }} className="upload-choose-button interactive-button">
+            Dosya Seç
+          </button>
+        </div>
+
+        {file ? (
+          <div className="upload-selected-file">
+            <span className="upload-file-icon" aria-hidden="true">PDF</span>
+            <div>
+              <strong>{file.name}</strong>
+              <small>{formatBytes(file.size)} · PDF</small>
+            </div>
+            <button type="button" onClick={removeFile} disabled={isAnalyzing} aria-label={t("removeFile", { name: file.name })}>×</button>
+          </div>
+        ) : null}
+
+        {error ? <div className="upload-error" role="alert">{error}</div> : null}
+
+        <footer className="upload-footer">
+          <p><span aria-hidden="true">ⓘ</span> PDF yüklendikten sonra içerik otomatik olarak analiz edilir.</p>
+          <button type="button" onClick={analyzePdf} disabled={!file || !courseId || isAnalyzing} className="upload-analyze-button interactive-button">
+            {isAnalyzing ? "PDF analiz ediliyor..." : "PDF’yi Analiz Et →"}
+          </button>
+        </footer>
       </section>
 
       {showCourseForm ? (

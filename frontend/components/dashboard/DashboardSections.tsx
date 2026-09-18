@@ -58,7 +58,7 @@ export function RecentCourses({ courses, documents, loading }: DashboardSectionP
 }
 
 export function RecentDocuments({ courses, documents, loading }: DashboardSectionProps) {
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
   const courseNames = new Map(courses.map((course) => [course.id, course.name]));
   const recentDocuments = [...documents]
     .sort((a, b) => {
@@ -72,7 +72,7 @@ export function RecentDocuments({ courses, documents, loading }: DashboardSectio
     <section className="dashboard-section dashboard-panel dashboard-recent-documents" aria-labelledby="recent-documents-heading">
       <div className="dashboard-section-head">
         <h2 id="recent-documents-heading">{t("recentDocuments")}</h2>
-        <Link href="/courses">{t("viewAll")} →</Link>
+        <Link href="/courses">{language === "tr" ? "Kurslarda Gör" : "View in Courses"} →</Link>
       </div>
       {loading ? <p className="dashboard-loading">{t("loading")}</p> : recentDocuments.length ? (
         <div className="dashboard-document-list">

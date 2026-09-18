@@ -52,11 +52,10 @@ function localDateKey(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
-function currentWeekMinutes(sessions: StudySession[], referenceDate: Date) {
-  const monday = new Date(referenceDate);
-  const mondayOffset = (monday.getDay() + 6) % 7;
-  monday.setHours(0, 0, 0, 0);
-  monday.setDate(monday.getDate() - mondayOffset);
+function rollingSevenDayData(sessions: StudySession[], referenceDate: Date) {
+  const firstDay = new Date(referenceDate);
+  firstDay.setHours(0, 0, 0, 0);
+  firstDay.setDate(firstDay.getDate() - 6);
 
   const minutesByDate = new Map<string, number>();
   sessions.forEach((session) => {
@@ -67,9 +66,12 @@ function currentWeekMinutes(sessions: StudySession[], referenceDate: Date) {
   });
 
   return Array.from({ length: 7 }, (_, index) => {
-    const date = new Date(monday);
-    date.setDate(monday.getDate() + index);
-    return minutesByDate.get(localDateKey(date)) ?? 0;
+    const date = new Date(firstDay);
+    date.setDate(firstDay.getDate() + index);
+    return {
+      date,
+      minutes: minutesByDate.get(localDateKey(date)) ?? 0,
+    };
   });
 }
 
@@ -113,8 +115,16 @@ export default function DashboardShell() {
   const [studyError, setStudyError] =
     useState<string | null>(null);
 
-  const [studyStatus, setStudyStatus] =
-    useState<string | null>(null);
+  const [toast, setToast] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timeout = window.setTimeout(() => setToast(null), 2800);
+    return () => window.clearTimeout(timeout);
+  }, [toast]);
 
   const [greetingKey] = useState<
     "goodMorning" |
@@ -303,7 +313,6 @@ export default function DashboardShell() {
   function openStudyModal() {
     setStudyDate(todayInputValue());
     setStudyError(null);
-    setStudyStatus(null);
     setStudyModalOpen(true);
   }
 
@@ -400,9 +409,10 @@ export default function DashboardShell() {
           sessions: null,
         }));
 
-        setStudyStatus(
-          t("studySessionSaved"),
-        );
+        setToast({
+          type: "success",
+          message: language === "tr" ? "Çalışma kaydı eklendi." : "Study session added.",
+        });
       } catch (statsCause) {
         if (isAbortError(statsCause)) {
           return;
@@ -422,6 +432,14 @@ export default function DashboardShell() {
               ),
             ),
         }));
+        setToast({
+          type: "error",
+          message: apiErrorMessage(
+            statsCause,
+            t("studySessionRefreshFailed"),
+            t("operationUnavailable"),
+          ),
+        });
       }
     } catch (cause) {
       if (isAbortError(cause)) {
@@ -435,6 +453,14 @@ export default function DashboardShell() {
           t("operationUnavailable"),
         ),
       );
+      setToast({
+        type: "error",
+        message: apiErrorMessage(
+          cause,
+          t("studySessionFailed"),
+          t("operationUnavailable"),
+        ),
+      });
     } finally {
       setStudySubmitting(false);
     }
@@ -445,13 +471,20 @@ export default function DashboardShell() {
     errors.documents ??
     errors.sessions;
 
-  const totalStudyMinutes = studySessions.reduce(
-    (total, session) => total + session.duration_minutes,
+  const sevenDayData = rollingSevenDayData(studySessions, dashboardDate);
+  const weeklyMinutes = sevenDayData.map((day) => day.minutes);
+  const totalStudyMinutes = weeklyMinutes.reduce(
+    (total, minutes) => total + minutes,
     0,
   );
-  const weeklyMinutes = currentWeekMinutes(studySessions, dashboardDate);
   const maxWeeklyMinutes = Math.max(...weeklyMinutes);
-  const activeDayIndex = (dashboardDate.getDay() + 6) % 7;
+  const activeDayIndex = 6;
+  const latestStudySession = [...studySessions].sort((left, right) =>
+    right.study_date.localeCompare(left.study_date) || right.id - left.id,
+  )[0];
+  const continueHref = latestStudySession
+    ? `/courses/${latestStudySession.course_id}`
+    : "/courses";
 
   return (
     <div className="dashboard-page">
@@ -471,8 +504,10 @@ export default function DashboardShell() {
             {t("dashboardIntro")}
           </p>
 
-          <Link href="/courses" className="dashboard-continue-button interactive-button">
-            <span aria-hidden="true">▶</span> {language === "tr" ? "Çalışmaya Devam Et" : "Continue Studying"}
+          <Link href={continueHref} className="dashboard-continue-button interactive-button">
+            <span aria-hidden="true">▶</span> {latestStudySession
+              ? language === "tr" ? "Çalışmaya Devam Et" : "Continue Studying"
+              : language === "tr" ? "Kurslara Git" : "Go to Courses"}
           </Link>
 
         </header>
@@ -509,10 +544,10 @@ export default function DashboardShell() {
 
           <div className="dashboard-study-visuals" aria-hidden="true">
             <div className="dashboard-week-chart">
-              {["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"].map((day, index) => (
-                <span className={index === activeDayIndex ? "active" : ""} key={day} title={`${weeklyMinutes[index]} ${language === "tr" ? "dakika" : "minutes"}`}>
+              {sevenDayData.map(({ date, minutes }, index) => (
+                <span className={index === activeDayIndex ? "active" : ""} key={localDateKey(date)} title={`${minutes} ${language === "tr" ? "dakika" : "minutes"}`}>
                   <i style={{ height: weeklyMinutes[index] > 0 && maxWeeklyMinutes > 0 ? `${Math.max(8, Math.round((weeklyMinutes[index] / maxWeeklyMinutes) * 50))}px` : "0px" }} />
-                  <small>{language === "tr" ? day : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][index]}</small>
+                  <small>{new Intl.DateTimeFormat(language === "tr" ? "tr-TR" : "en-US", { weekday: "short" }).format(date).replace(".", "")}</small>
                 </span>
               ))}
             </div>
@@ -549,13 +584,11 @@ export default function DashboardShell() {
         </p>
       ) : null}
 
-      {studyStatus ? (
-        <p
-          className="dashboard-study-status"
-          role="status"
-        >
-          {studyStatus}
-        </p>
+      {toast ? (
+        <div className={`dashboard-toast dashboard-toast--${toast.type}`} role={toast.type === "error" ? "alert" : "status"}>
+          <span aria-hidden="true">{toast.type === "success" ? "✓" : "!"}</span>
+          {toast.message}
+        </div>
       ) : null}
 
       <div className="dashboard-bottom-grid">

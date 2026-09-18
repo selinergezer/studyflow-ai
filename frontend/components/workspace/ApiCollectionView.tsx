@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import Card from "@/components/ui/Card";
 import Button from "@/components/ui/Button";
+import QuizCreateModal from "@/components/workspace/QuizCreateModal";
+import FlashcardCreateModal from "@/components/workspace/FlashcardCreateModal";
 import {
   apiErrorMessage,
   apiFetch,
@@ -73,6 +75,8 @@ export default function ApiCollectionView({
   const [collectionFilter, setCollectionFilter] = useState<"all" | "created">("all");
   const [collectionSort, setCollectionSort] = useState<"newest" | "oldest">("newest");
   const [quizMenuDocumentId, setQuizMenuDocumentId] = useState<number | null>(null);
+  const [collectionModalOpen, setCollectionModalOpen] = useState(false);
+  const [modalDocumentId, setModalDocumentId] = useState<number | undefined>();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -567,16 +571,17 @@ export default function ApiCollectionView({
             <div className="courses-stats quizzes-stats">
               <div><span>▤</span><strong>{quizzes.length}</strong><small>Toplam Sınav</small></div>
               <div><span>?</span><strong>{totalQuestions}</strong><small>Toplam Soru</small></div>
-              <div><span>◎</span><strong>0%</strong><small>Ortalama Başarı</small></div>
-              <div><span>□</span><strong>0</strong><small>Bu Hafta</small></div>
+              <div><span>◎</span><strong>—</strong><small>Ortalama Başarı</small></div>
+              <div><span>□</span><strong>—</strong><small>Bu Hafta</small></div>
             </div>
           </div>
 
           <div className="courses-hero-art quizzes-hero-art"><CollectionArtwork kind="quizzes" /></div>
 
-          <Link
-            href="/library?action=quiz"
+          <button
+            type="button"
             className="courses-primary-button"
+            onClick={() => { setModalDocumentId(undefined); setCollectionModalOpen(true); }}
           >
             <svg
               viewBox="0 0 24 24"
@@ -588,10 +593,10 @@ export default function ApiCollectionView({
             </svg>
 
             {t("createQuizLower")}
-          </Link>
+          </button>
         </header>
 
-        <div className="courses-toolbar quizzes-toolbar">
+        <div id="quiz-documents" className="courses-toolbar quizzes-toolbar">
           <label className="courses-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span className="sr-only">Sınav ara</span><input type="search" value={collectionQuery} onChange={(event) => setCollectionQuery(event.target.value)} placeholder="Sınav ara..." /></label>
           <select className="courses-filter" value={collectionSort} onChange={(event) => setCollectionSort(event.target.value as "newest" | "oldest")} aria-label="Sınav sıralaması"><option value="newest">En Yeni</option><option value="oldest">En Eski</option></select>
           <div className="courses-view-toggle" role="group" aria-label="Görünüm seç"><button type="button" className={collectionView === "grid" ? "active" : ""} onClick={() => setCollectionView("grid")} aria-label="Izgara görünümü">▦</button><button type="button" className={collectionView === "list" ? "active" : ""} onClick={() => setCollectionView("list")} aria-label="Liste görünümü">☰</button></div>
@@ -682,9 +687,12 @@ export default function ApiCollectionView({
                       event.preventDefault();
                       event.stopPropagation();
 
-                      router.push(
-                        `/documents/${document.id}?tab=quiz`,
-                      );
+                      if (document.quizCount) {
+                        router.push(`/documents/${document.id}?tab=quiz`);
+                      } else {
+                        setModalDocumentId(document.id);
+                        setCollectionModalOpen(true);
+                      }
                     }}
                   >
                     {document.quizCount ? "Sınavı Aç" : t("createQuizLower")} <span aria-hidden="true">→</span>
@@ -712,6 +720,7 @@ export default function ApiCollectionView({
             </Link>
           </div>
         )}
+        <QuizCreateModal open={collectionModalOpen} initialDocumentId={modalDocumentId} onClose={() => setCollectionModalOpen(false)} />
       </div>
     );
   }
@@ -969,9 +978,10 @@ export default function ApiCollectionView({
 
         <CollectionArtwork kind="flashcards" />
 
-        <Link
-          href="/library?action=flashcards"
+        <button
+          type="button"
           className="flashcards-primary-button"
+          onClick={() => { setModalDocumentId(undefined); setCollectionModalOpen(true); }}
         >
           <svg
             viewBox="0 0 24 24"
@@ -983,10 +993,10 @@ export default function ApiCollectionView({
           </svg>
 
           {t("generateFlashcards")}
-        </Link>
+        </button>
       </header>
 
-      <div className="collection-toolbar">
+      <div id="flashcard-documents" className="collection-toolbar">
         <label><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input type="search" value={collectionQuery} onChange={(event) => setCollectionQuery(event.target.value)} placeholder="Bilgi kartı ara..." /></label>
         <select value={collectionFilter} onChange={(event) => setCollectionFilter(event.target.value as "all" | "created")} aria-label="Bilgi kartı filtresi"><option value="all">Tümü</option><option value="created">Oluşturduklarım</option></select>
         <select value={collectionSort} onChange={(event) => setCollectionSort(event.target.value as "newest" | "oldest")} aria-label="Bilgi kartı sıralaması"><option value="newest">En Yeni</option><option value="oldest">En Eski</option></select>
@@ -1093,27 +1103,15 @@ export default function ApiCollectionView({
                 </div>
 
                 <div className="flashcards-actions">
-                  <Link
-                    href={`/documents/${document.documentId}?tab=flashcards`}
-                  >
-                    {language === "tr"
-                      ? "Görüntüle"
-                      : "View"}
-                  </Link>
+                  {document.flashcardCount > 0 ? (
+                    <Link href={`/documents/${document.documentId}?tab=flashcards`}>
+                      {language === "tr" ? "Görüntüle" : "View"}
+                    </Link>
+                  ) : <span className="is-disabled">{language === "tr" ? "Henüz kart yok" : "No cards yet"}</span>}
 
-                  <Link
-                    href={`/documents/${document.documentId}?tab=flashcards`}
-                  >
-                    {contentLoading
-                      ? t("loading")
-                      : document.flashcardCount
-                        ? language === "tr"
-                          ? "Yeni kart oluştur"
-                          : "Create new card"
-                        : t(
-                            "generateFlashcards",
-                          )}
-                  </Link>
+                  <button type="button" disabled={contentLoading} onClick={() => { setModalDocumentId(document.documentId); setCollectionModalOpen(true); }}>
+                    {contentLoading ? t("loading") : document.flashcardCount ? (language === "tr" ? "Yeni Kart Seti Oluştur" : "Create New Card Set") : t("generateFlashcards")}
+                  </button>
                 </div>
               </article>
             ),
@@ -1138,6 +1136,7 @@ export default function ApiCollectionView({
           </Link>
         </div>
       )}
+      <FlashcardCreateModal open={collectionModalOpen} initialDocumentId={modalDocumentId} onClose={() => setCollectionModalOpen(false)} />
     </div>
   );
 }

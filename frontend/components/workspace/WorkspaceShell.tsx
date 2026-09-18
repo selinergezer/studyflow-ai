@@ -592,7 +592,7 @@ export default function WorkspaceShell({
                     ) : notifications.length ===
                       0 ? (
                       <div className="workspace-notification-empty">
-                        {t("noNotifications")}
+                        {language === "tr" ? "Henüz bildirimin yok." : "You don't have any notifications yet."}
                       </div>
                     ) : (
                       notifications.map(
