@@ -1,6 +1,8 @@
+import asyncio
 import json
 import os
 import shutil
+import threading
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
@@ -158,10 +160,10 @@ def stream_document_summary(
     current_user: User = Depends(get_current_user)
 ):
     document = _get_accessible_document(
-    db,
-    document_id,
-    current_user,
-)
+        db,
+        document_id,
+        current_user,
+    )
 
     if document is None:
         raise HTTPException(
@@ -177,62 +179,100 @@ def stream_document_summary(
 
     document_text = document.text
 
-    def event_stream():
-        stream_db = SessionLocal()
-        final_summary = None
+    async def event_stream():
+        """Bridge the blocking LM Studio generator to SSE without blocking ASGI."""
+        event_loop = asyncio.get_running_loop()
+        output_queue = asyncio.Queue()
+        stop_requested = threading.Event()
+        stream_finished = object()
 
-        try:
-            for stream_event in generate_document_summary_stream(document_text):
-                if stream_event["event"] == "complete":
-                    final_summary = stream_event["final_summary"]
-                    continue
+        def enqueue_output(output):
+            if not stop_requested.is_set():
+                event_loop.call_soon_threadsafe(output_queue.put_nowait, output)
 
-                yield _sse_event(
-                    stream_event["event"],
-                    stream_event["data"],
+        def produce_summary():
+            stream_db = SessionLocal()
+            final_summary = None
+
+            try:
+                # This generator performs blocking httpx streaming, Queue.get(),
+                # and document processing. The complete chain must stay off the
+                # FastAPI event loop.
+                for stream_event in generate_document_summary_stream(document_text):
+                    if stop_requested.is_set():
+                        return
+
+                    if stream_event["event"] == "complete":
+                        final_summary = stream_event["final_summary"]
+                        continue
+
+                    enqueue_output(_sse_event(
+                        stream_event["event"],
+                        stream_event["data"],
+                    ))
+
+                if not final_summary or not final_summary.strip():
+                    raise LMStudioServiceError("LM Studio boş özet oluşturdu.")
+
+                stream_document = (
+                    stream_db.query(Document)
+                    .filter(Document.id == document_id)
+                    .first()
                 )
 
-            if not final_summary or not final_summary.strip():
-                raise LMStudioServiceError("LM Studio boş özet oluşturdu.")
+                if stream_document is None:
+                    raise ValueError("Document artık mevcut değil.")
 
-            stream_document = (
-                stream_db.query(Document)
-                .filter(Document.id == document_id)
-                .first()
-            )
+                stream_document.summary = final_summary
+                stream_db.commit()
+                enqueue_output(_sse_event("done", {"status": "completed"}))
 
-            if stream_document is None:
-                raise ValueError("Document artık mevcut değil.")
+            except (LMStudioServiceError, ValueError) as error:
+                stream_db.rollback()
+                print(f"ÖZETLEME STREAM HATASI: {repr(error)}", flush=True)
+                enqueue_output(_sse_event(
+                    "error",
+                    {
+                        "status": "failed",
+                        "message": "Özet oluşturulurken bir hata oluştu. Tekrar deneyebilirsiniz."
+                    },
+                ))
 
-            stream_document.summary = final_summary
-            stream_db.commit()
+            except Exception as error:
+                stream_db.rollback()
+                print(f"BEKLENMEYEN STREAM HATASI: {repr(error)}", flush=True)
+                enqueue_output(_sse_event(
+                    "error",
+                    {
+                        "status": "failed",
+                        "message": "Özet oluşturulurken bir hata oluştu. Tekrar deneyebilirsiniz."
+                    },
+                ))
 
-            yield _sse_event("done", {"status": "completed"})
+            finally:
+                stream_db.close()
+                enqueue_output(stream_finished)
 
-        except (LMStudioServiceError, ValueError) as error:
-            stream_db.rollback()
-            print(f"ÖZETLEME STREAM HATASI: {repr(error)}", flush=True)
-            yield _sse_event(
-                "error",
-                {
-                    "status": "failed",
-                    "message": "Özet oluşturulurken bir hata oluştu. Tekrar deneyebilirsiniz."
-                },
-            )
+        producer_task = asyncio.create_task(asyncio.to_thread(produce_summary))
 
-        except Exception as error:
-            stream_db.rollback()
-            print(f"BEKLENMEYEN STREAM HATASI: {repr(error)}", flush=True)
-            yield _sse_event(
-                "error",
-                {
-                    "status": "failed",
-                    "message": "Özet oluşturulurken bir hata oluştu. Tekrar deneyebilirsiniz."
-                },
-            )
+        try:
+            while True:
+                output = await output_queue.get()
 
+                if output is stream_finished:
+                    break
+
+                yield output
         finally:
-            stream_db.close()
+            stop_requested.set()
+
+            if not producer_task.done():
+                producer_task.cancel()
+
+            try:
+                await producer_task
+            except asyncio.CancelledError:
+                pass
 
     return StreamingResponse(
         event_stream(),
