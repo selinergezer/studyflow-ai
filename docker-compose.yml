@@ -36,3 +36,5 @@ services:
 
 volumes:
   postgres_data:
+    external: true
+    name: studyflow-ai_postgres_data
