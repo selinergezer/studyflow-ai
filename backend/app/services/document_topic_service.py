@@ -7,10 +7,11 @@ from collections import deque
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
-from queue import Queue
+from queue import Empty, Queue
 
 from app.services.ai_service import (
     LMStudioServiceError,
+    is_transient_lmstudio_error,
     _clean_json_response,
     _generate_with_lmstudio,
     _generate_with_lmstudio_stream,
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 CHUNK_MAX_CHARS = 4500
 LONG_DOCUMENT_MIN_CHARS = 100000
+SUMMARY_QUEUE_POLL_INTERVAL_SECONDS = 1.0
+SUMMARY_QUEUE_INACTIVITY_TIMEOUT_SECONDS = 210.0
+SUMMARY_MAIN_MAX_RETRIES = 2
+SUMMARY_MAIN_RETRY_BACKOFF_SECONDS = (1.0, 2.0)
 
 
 def _is_reference_section_heading(line: str) -> bool:
@@ -794,6 +799,7 @@ def _generate_chunk_summaries(text: str) -> list[dict]:
             )
             for index, chunk in enumerate(chunks, start=1)
         ]
+
         return [future.result() for future in futures]
 
 
@@ -993,25 +999,45 @@ PDF PARÇASI:
 {streaming_chunk}
 """
 
+    def report_gate_wait() -> None:
+        # Internal activity only: the job service consumes it without SSE replay.
+        output_queue.put((chunk_index, "activity", "lm_gate_wait"))
+
     first_token_received = False
     chunk_parts = []
 
     try:
-        for content in _generate_with_lmstudio_stream(
-            prompt,
-            num_predict=num_predict,
-        ):
-            if not first_token_received:
-                first_token_duration = time.perf_counter() - chunk_started_at
-                logger.info(
-                    "Chunk %s ilk token: %.1f sn",
-                    chunk_index,
-                    first_token_duration,
-                )
-                first_token_received = True
+        for attempt in range(SUMMARY_MAIN_MAX_RETRIES + 1):
+            try:
+                for content in _generate_with_lmstudio_stream(
+                    prompt,
+                    num_predict=num_predict,
+                    on_gate_wait=report_gate_wait,
+                ):
+                    if not first_token_received:
+                        first_token_duration = time.perf_counter() - chunk_started_at
+                        logger.info(
+                            "Chunk %s ilk token: %.1f sn",
+                            chunk_index,
+                            first_token_duration,
+                        )
+                        first_token_received = True
 
-            chunk_parts.append(content)
-            output_queue.put((chunk_index, "token", content))
+                    chunk_parts.append(content)
+                    output_queue.put((chunk_index, "token", content))
+
+                break
+            except LMStudioServiceError as error:
+                if (first_token_received or attempt >= SUMMARY_MAIN_MAX_RETRIES
+                        or not is_transient_lmstudio_error(error)):
+                    raise
+                logger.warning(
+                    "Chunk %s/%s main request transient failure; retry %s/%s",
+                    chunk_index, total_chunks, attempt + 1, SUMMARY_MAIN_MAX_RETRIES,
+                )
+                output_queue.put((chunk_index, "activity", "lm_request_retry"))
+                # The HTTP context has already released the shared gate.
+                time.sleep(SUMMARY_MAIN_RETRY_BACKOFF_SECONDS[attempt])
 
         if not first_token_received:
             raise LMStudioServiceError(
@@ -1057,6 +1083,7 @@ Yarım özet:
                 for content in _generate_with_lmstudio_stream(
                     continuation_prompt,
                     num_predict=70,
+                    on_gate_wait=report_gate_wait,
                 ):
                     continuation_parts.append(content)
                     chunk_parts.append(content)
@@ -1160,10 +1187,52 @@ def generate_document_summary_stream(text: str):
             for index, chunk in enumerate(chunks, start=1)
         ]
 
+        def cancel_pending_chunks() -> None:
+            for future in futures:
+                future.cancel()
+
+        last_queue_activity = time.monotonic()
+
         while next_chunk_index <= total_chunks:
-            chunk_index, event_type, value = output_queue.get()
+            try:
+                chunk_index, event_type, value = output_queue.get(
+                    timeout=SUMMARY_QUEUE_POLL_INTERVAL_SECONDS,
+                )
+                last_queue_activity = time.monotonic()
+            except Empty:
+                completed_futures = [future for future in futures if future.done()]
+
+                for future in completed_futures:
+                    future_error = future.exception()
+
+                    if future_error is not None:
+                        cancel_pending_chunks()
+                        raise LMStudioServiceError(
+                            "Summary chunk worker beklenmedik şekilde sonlandı."
+                        ) from future_error
+
+                if len(completed_futures) == len(futures):
+                    cancel_pending_chunks()
+                    raise LMStudioServiceError(
+                        "Summary chunk worker terminal event üretmeden sonlandı."
+                    )
+
+                inactive_for = time.monotonic() - last_queue_activity
+
+                if inactive_for >= SUMMARY_QUEUE_INACTIVITY_TIMEOUT_SECONDS:
+                    cancel_pending_chunks()
+                    raise LMStudioServiceError(
+                        "Summary generation uzun süre ilerleme kaydetmedi."
+                    )
+
+                continue
+
+            if event_type == "activity":
+                yield {"event": "activity", "data": {"last_event": value}}
+                continue
 
             if event_type == "error":
+                cancel_pending_chunks()
                 raise value
 
             buffered_events[chunk_index].append((event_type, value))

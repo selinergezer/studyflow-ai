@@ -2,10 +2,12 @@ import json
 import logging
 import re
 import time
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 import httpx
 from pydantic import BaseModel
+
+from app.services.lmstudio_request_gate import lmstudio_request_gate
 
 
 # =========================================================
@@ -20,6 +22,13 @@ LMSTUDIO_SUMMARY_MODEL = "gemma-3-12b-it-qat"
 # Quiz modeli
 LMSTUDIO_QUIZ_MODEL = "qwen3-8b"
 
+# These are per-request/per-socket inactivity limits, not a total document
+# generation deadline. Every received stream line resets HTTPX's read timer.
+LMSTUDIO_STREAM_CONNECT_TIMEOUT_SECONDS = 30.0
+LMSTUDIO_STREAM_READ_TIMEOUT_SECONDS = 180.0
+LMSTUDIO_STREAM_WRITE_TIMEOUT_SECONDS = 30.0
+LMSTUDIO_STREAM_POOL_TIMEOUT_SECONDS = 30.0
+
 
 # =========================================================
 # ERRORS
@@ -27,6 +36,24 @@ LMSTUDIO_QUIZ_MODEL = "qwen3-8b"
 
 class LMStudioServiceError(RuntimeError):
     """LM Studio servisinden kontrollü olarak dönen hata."""
+
+
+def is_transient_lmstudio_error(error: LMStudioServiceError) -> bool:
+    cause = error.__cause__
+    if isinstance(cause, httpx.HTTPStatusError):
+        if cause.response.status_code not in {500, 502, 503, 504}:
+            return False
+        detail = cause.response.text.lower()
+        # A missing/invalid model needs configuration/lifecycle investigation,
+        # not repeated inference with the same invalid model identifier.
+        return not any(marker in detail for marker in (
+            "model_not_found", "model does not exist", "model not found",
+            "invalid model", "unsupported model", "invalid_api_key",
+        ))
+    return isinstance(cause, (
+        httpx.ConnectError, httpx.ReadError, httpx.WriteError,
+        httpx.RemoteProtocolError,
+    ))
 
 
 # =========================================================
@@ -71,14 +98,15 @@ def _generate_with_lmstudio(
         }
 
     try:
-        response = httpx.post(
-            f"{LMSTUDIO_BASE_URL}/v1/chat/completions",
-            json=payload,
-            timeout=300.0,
-        )
+        with lmstudio_request_gate():
+            response = httpx.post(
+                f"{LMSTUDIO_BASE_URL}/v1/chat/completions",
+                json=payload,
+                timeout=300.0,
+            )
 
-        response.raise_for_status()
-        data = response.json()
+            response.raise_for_status()
+            data = response.json()
 
     except httpx.HTTPStatusError as error:
         print(
@@ -128,6 +156,7 @@ def _generate_with_lmstudio_stream(
     *,
     num_predict: int = 850,
     model: Optional[str] = None,
+    on_gate_wait: Optional[Callable[[], None]] = None,
 ):
     """
     Özet veya diğer LM Studio özelliklerinde kullanılabilecek
@@ -151,13 +180,15 @@ def _generate_with_lmstudio_stream(
     }
 
     try:
-        with httpx.stream(
+        with lmstudio_request_gate(on_gate_wait), httpx.stream(
             "POST",
             f"{LMSTUDIO_BASE_URL}/v1/chat/completions",
             json=payload,
             timeout=httpx.Timeout(
-                300.0,
-                connect=30.0,
+                connect=LMSTUDIO_STREAM_CONNECT_TIMEOUT_SECONDS,
+                read=LMSTUDIO_STREAM_READ_TIMEOUT_SECONDS,
+                write=LMSTUDIO_STREAM_WRITE_TIMEOUT_SECONDS,
+                pool=LMSTUDIO_STREAM_POOL_TIMEOUT_SECONDS,
             ),
         ) as response:
 
@@ -216,6 +247,18 @@ def _generate_with_lmstudio_stream(
                     and content
                 ):
                     yield content
+
+    except httpx.ReadTimeout as error:
+
+        raise LMStudioServiceError(
+            "LM Studio streaming yanıtı uzun süre veri göndermedi."
+        ) from error
+
+    except httpx.TimeoutException as error:
+
+        raise LMStudioServiceError(
+            "LM Studio streaming isteği zaman aşımına uğradı."
+        ) from error
 
     except httpx.HTTPStatusError as error:
 

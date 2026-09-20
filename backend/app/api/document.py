@@ -258,6 +258,18 @@ def get_document_summary_status(
         "has_summary": False,
     }
 
+    if job["status"] == "generating":
+        for key in (
+            "started_at",
+            "last_activity_at",
+            "last_event",
+            "completed_chunks",
+            "inactive_seconds",
+        ):
+            response[key] = job[key]
+        if "total_chunks" in job:
+            response["total_chunks"] = job["total_chunks"]
+
     if job["status"] == "failed" and job["error"]:
         response["error"] = job["error"]
 

@@ -18,9 +18,14 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+if __package__:
+    from .lmstudio_request_gate import lmstudio_request_gate
+else:  # Preserve the standalone diagnostic CLI entry point.
+    from lmstudio_request_gate import lmstudio_request_gate
 
 
 # ============================================================
@@ -3787,6 +3792,25 @@ def has_precision_escalation(
     return False
 
 
+def _is_meta_instruction_question(text: str) -> bool:
+    # Match requests to write questions, not discussion of question writing.
+    normalized = normalize_text(text.replace("İ", "i"))
+    return bool(re.search(
+        r"\bsoru(?:yu|lar|ları)?\s+"
+        r"(?:oluştur|hazırla|yaz|üret|tasarla|türet)"
+        r"(?:(?:ın|in|un|ün|yın|yin|n|ınız|iniz|unuz|ünüz|yınız|yiniz|niz)?"
+        r"|(?:ur|ar|r)\s+(?:mısın|misin|musun|müsün|mısınız|misiniz|musunuz|müsünüz))"
+        r"(?:\s+lütfen)?$",
+        normalized,
+    ) or re.search(
+        r"^(?:(?:please|now)\s+|(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+        r"(?:generate|create|write|compose|formulate|construct|prepare|produce|draft)\s+"
+        r"(?:(?:me|us)\s+)?(?:(?:a|an|one|another|the)\s+)?"
+        r"(?:(?:quiz|exam|test|multiple choice|student|practice)\s+)?questions?\b",
+        normalized,
+    ))
+
+
 def validate_question(
     question: QuizQuestion,
     evidence_by_id: dict[int, Evidence],
@@ -3820,6 +3844,9 @@ def validate_question(
             question.question_text
         )
     )
+
+    if _is_meta_instruction_question(question.question_text):
+        return False, "meta_instruction_question"
 
     normalized_options = [
         normalize_text(option)
@@ -4506,7 +4533,7 @@ def stream_quiz(
 
     try:
 
-        with urlopen(
+        with lmstudio_request_gate(), urlopen(
             request,
             timeout=REQUEST_TIMEOUT_SECONDS,
         ) as response:
@@ -4798,6 +4825,7 @@ def _production_batch(
     target_count: int | None = None,
     validation_evidence_by_id: dict[int, Evidence] | None = None,
     generation_deadline: float | None = None,
+    exclude_gate_wait: Callable[[float], None] | None = None,
 ) -> Iterator[QuizQuestion]:
     """Stream, parse and validate one initial/refill LM Studio request."""
     body = {
@@ -4818,75 +4846,84 @@ def _production_batch(
         item.evidence_id: item for item in evidence
     }
     try:
-        request_timeout = REQUEST_TIMEOUT_SECONDS
-        if generation_deadline is not None:
-            request_timeout = max(
-                1.0,
-                min(request_timeout, generation_deadline - time.monotonic()),
-            )
-        with urlopen(request, timeout=request_timeout) as response:
-            for content in iter_sse_content(response, metrics):
-                if (
-                    generation_deadline is not None
-                    and time.monotonic() >= generation_deadline
-                ):
-                    raise LMStudioError("Quiz üretim süre bütçesi aşıldı.")
-                for candidate in parser.feed(content):
-                    try:
-                        question = compact_to_question(candidate)
-                    except ValueError as exc:
-                        if batch_metrics is not None:
-                            batch_metrics.rejected_count += 1
-                            batch_metrics.rejection_reasons[str(exc)] += 1
-                        candidate_id = (
-                            candidate.get("i") if isinstance(candidate, dict) else None
-                        )
-                        if isinstance(candidate_id, int) and candidate_id in evidence_by_id:
-                            lock = session_lock or threading.Lock()
-                            with lock:
-                                session.rejected_evidence_ids.add(candidate_id)
-                                session.rejected_evidence_texts.add(normalize_text(
-                                    evidence_by_id[candidate_id].text
-                                ))
-                        logger.info("Quiz candidate rejected reason=%s", exc)
-                        continue
-                    lock = session_lock or threading.Lock()
-                    with lock:
-                        if target_count is not None and session.accepted_count >= target_count:
-                            continue
-                        valid, reason = validate_question(
-                            question,
-                            evidence_by_id,
-                            session.accepted_question_texts,
-                            session.accepted_evidence_ids,
-                            accepted_question_facts=session.accepted_question_facts,
-                        )
-                        if valid:
-                            session.accepted_question_texts.add(
-                                normalize_text(question.question_text)
-                            )
-                            session.accepted_question_facts.append(
-                                (question.question_text, question.options[question.correct_index])
-                            )
-                            session.accepted_evidence_ids.add(question.evidence_id)
-                            session.accepted_count += 1
+        if generation_deadline is not None and time.monotonic() >= generation_deadline:
+            raise LMStudioError("Quiz üretim süre bütçesi aşıldı.")
+        with lmstudio_request_gate() as waited:
+            if generation_deadline is not None:
+                generation_deadline += waited
+            if exclude_gate_wait is not None:
+                exclude_gate_wait(waited)
+            if generation_deadline is not None and time.monotonic() >= generation_deadline:
+                raise LMStudioError("Quiz üretim süre bütçesi aşıldı.")
+            request_timeout = REQUEST_TIMEOUT_SECONDS
+            if generation_deadline is not None:
+                request_timeout = max(
+                    1.0,
+                    min(request_timeout, generation_deadline - time.monotonic()),
+                )
+            with urlopen(request, timeout=request_timeout) as response:
+                for content in iter_sse_content(response, metrics):
+                    if (
+                        generation_deadline is not None
+                        and time.monotonic() >= generation_deadline
+                    ):
+                        raise LMStudioError("Quiz üretim süre bütçesi aşıldı.")
+                    for candidate in parser.feed(content):
+                        try:
+                            question = compact_to_question(candidate)
+                        except ValueError as exc:
                             if batch_metrics is not None:
-                                batch_metrics.accepted_count += 1
-                        elif batch_metrics is not None:
-                            batch_metrics.rejected_count += 1
-                            batch_metrics.rejection_reasons[reason] += 1
-                            session.rejected_evidence_ids.add(question.evidence_id)
-                            session.rejected_evidence_texts.add(normalize_text(
-                                evidence_by_id[question.evidence_id].text
-                            ))
-                    if not valid:
-                        logger.info(
-                            "Quiz candidate rejected evidence=%s reason=%s",
-                            question.evidence_id,
-                            reason,
-                        )
-                        continue
-                    yield shuffle_question_options(question, random.SystemRandom())
+                                batch_metrics.rejected_count += 1
+                                batch_metrics.rejection_reasons[str(exc)] += 1
+                            candidate_id = (
+                                candidate.get("i") if isinstance(candidate, dict) else None
+                            )
+                            if isinstance(candidate_id, int) and candidate_id in evidence_by_id:
+                                lock = session_lock or threading.Lock()
+                                with lock:
+                                    session.rejected_evidence_ids.add(candidate_id)
+                                    session.rejected_evidence_texts.add(normalize_text(
+                                        evidence_by_id[candidate_id].text
+                                    ))
+                            logger.info("Quiz candidate rejected reason=%s", exc)
+                            continue
+                        lock = session_lock or threading.Lock()
+                        with lock:
+                            if target_count is not None and session.accepted_count >= target_count:
+                                continue
+                            valid, reason = validate_question(
+                                question,
+                                evidence_by_id,
+                                session.accepted_question_texts,
+                                session.accepted_evidence_ids,
+                                accepted_question_facts=session.accepted_question_facts,
+                            )
+                            if valid:
+                                session.accepted_question_texts.add(
+                                    normalize_text(question.question_text)
+                                )
+                                session.accepted_question_facts.append(
+                                    (question.question_text, question.options[question.correct_index])
+                                )
+                                session.accepted_evidence_ids.add(question.evidence_id)
+                                session.accepted_count += 1
+                                if batch_metrics is not None:
+                                    batch_metrics.accepted_count += 1
+                            elif batch_metrics is not None:
+                                batch_metrics.rejected_count += 1
+                                batch_metrics.rejection_reasons[reason] += 1
+                                session.rejected_evidence_ids.add(question.evidence_id)
+                                session.rejected_evidence_texts.add(normalize_text(
+                                    evidence_by_id[question.evidence_id].text
+                                ))
+                        if not valid:
+                            logger.info(
+                                "Quiz candidate rejected evidence=%s reason=%s",
+                                question.evidence_id,
+                                reason,
+                            )
+                            continue
+                        yield shuffle_question_options(question, random.SystemRandom())
     except HTTPError as exc:
         details = exc.read().decode("utf-8", errors="replace")
         raise LMStudioError(f"HTTP {exc.code}: {details}") from exc
@@ -5010,6 +5047,13 @@ def generate_production_quiz(
         MAX_LM_CONCURRENCY,
     )
 
+    def exclude_gate_wait(seconds: float) -> None:
+        nonlocal generation_deadline
+        # The one active batch owns this budget. Retain the adjustment across
+        # refills; queue time is not model generation time.
+        with session_lock:
+            generation_deadline += seconds
+
     def run_batch(
         batch_id: int,
         evidence: list[Evidence],
@@ -5027,6 +5071,7 @@ def generate_production_quiz(
                 target_count=question_count,
                 validation_evidence_by_id=validation_evidence_by_id,
                 generation_deadline=generation_deadline,
+                exclude_gate_wait=exclude_gate_wait,
             ):
                 event_queue.put(("question", batch_id, question))
         except BaseException as exc:
