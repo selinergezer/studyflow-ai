@@ -54,6 +54,8 @@ export default function CourseWorkspace({ courseId }: { courseId: number }) {
   const [documents, setDocuments] = useState<DocumentData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const deletingRef = useRef(new Set<number>());
+  const [deletingIds, setDeletingIds] = useState(new Set<number>());
   const [query, setQuery] = useState("");
   const [view, setView] = useState<"grid" | "list">("grid");
   const [sortOrder, setSortOrder] = useState("recent");
@@ -84,6 +86,26 @@ export default function CourseWorkspace({ courseId }: { courseId: number }) {
 
   function documentId(document: DocumentData) {
     return document.id ?? document.document_id;
+  }
+
+  async function deleteDocument(document: DocumentData) {
+    const id = documentId(document);
+    if (id == null || deletingRef.current.has(id)) return;
+    if (!window.confirm(language === "tr"
+      ? `${document.filename} belgesini silmek istediğinize emin misiniz?`
+      : `Are you sure you want to delete ${document.filename}?`)) return;
+    deletingRef.current.add(id);
+    setDeletingIds(new Set(deletingRef.current));
+    setError(null);
+    try {
+      await apiFetch(`/documents/${id}`, { method: "DELETE" });
+      setDocuments((current) => current.filter((item) => documentId(item) !== id));
+    } catch (cause) {
+      setError(apiErrorMessage(cause, "Belge silinemedi. Lütfen tekrar deneyin.", "Belge şu anda silinemiyor. Lütfen daha sonra tekrar deneyin."));
+    } finally {
+      deletingRef.current.delete(id);
+      setDeletingIds(new Set(deletingRef.current));
+    }
   }
 
   const visibleDocuments = [...documents]
@@ -141,7 +163,12 @@ export default function CourseWorkspace({ courseId }: { courseId: number }) {
               if (id == null) return null;
               const finance = /ekonomi|finans|econom|finance/i.test(document.filename);
               return (
-                <Link key={id} href={`/documents/${id}`} className="course-document-card interactive-card">
+                <div key={id} className="course-document-card interactive-card">
+                  <button type="button" aria-label={`${document.filename} — Sil`} disabled={deletingIds.has(id)}
+                    style={{ position: "absolute", right: 12, top: 12, zIndex: 2, borderRadius: 6, padding: "4px 8px", background: "var(--course-detail-surface)", cursor: "pointer" }}
+                    onClick={(event) => { event.preventDefault(); event.stopPropagation(); void deleteDocument(document); }}>
+                    {deletingIds.has(id) ? "Siliniyor..." : "Sil"}
+                  </button>
                   <span className="course-document-tape" aria-hidden="true" />
                   <span className="course-document-visual">
                     <span className="course-document-pdf"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg><small>PDF</small></span>
@@ -151,9 +178,9 @@ export default function CourseWorkspace({ courseId }: { courseId: number }) {
                     <strong title={document.filename}>{document.filename}</strong>
                     <span className="course-document-meta">{document.page_count} {t("pages")}</span>
                     <span className="course-document-rule" />
-                    <span className="course-document-footer"><span>{language === "tr" ? "Aç →" : "Open →"}</span><b>PDF</b></span>
+                    <span className="course-document-footer"><Link href={`/documents/${id}`}><span style={{ position: "absolute", inset: 0 }} aria-hidden="true" />{language === "tr" ? "Aç →" : "Open →"}</Link><b>PDF</b></span>
                   </span>
-                </Link>
+                </div>
               );
             })}
           </div>

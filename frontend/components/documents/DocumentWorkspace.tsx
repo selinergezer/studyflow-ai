@@ -10,12 +10,16 @@ import {
   apiFetch,
   API_URL,
   deleteQuizApi,
+  getDocument,
+  getDocumentSummaryStatus,
   getToken,
   isAbortError,
   type DocumentData,
   type Flashcard,
   type Quiz,
+  type SummaryGenerationStatus,
 } from "@/lib/api";
+import { createSummarySession, type SummaryProgress } from "@/lib/summary-session";
 import { useLanguage } from "@/providers/LanguageProvider";
 
 type Tab = "summary" | "quiz" | "flashcards";
@@ -155,6 +159,10 @@ export default function DocumentWorkspace({
   const [error, setError] = useState<string | null>(null);
   const [summaryText, setSummaryText] = useState("");
   const [summaryStreaming, setSummaryStreaming] = useState(false);
+  const [summaryProgress, setSummaryProgress] = useState<SummaryProgress>({ completed_chunks: 0 });
+  const summarySessionRef = useRef<ReturnType<typeof createSummarySession> | null>(null);
+  const [summaryStatus, setSummaryStatus] =
+    useState<SummaryGenerationStatus | null>(null);
 
   const [flashcardCount, setFlashcardCount] = useState(10);
   const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
@@ -174,13 +182,40 @@ export default function DocumentWorkspace({
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
+    const session = createSummarySession({
+      signal,
+      getStatus: () => getDocumentSummaryStatus(documentId, signal),
+      getDocument: () => getDocument(documentId, { fresh: true, signal }),
+      openStream: () => {
+        const token = getToken();
+        return fetch(`${API_URL}/documents/${documentId}/summary/stream`, {
+          signal,
+          headers: {
+            Accept: "text/event-stream",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+        });
+      },
+      onDocument: (item) => {
+        const normalized = { ...item, document_id: item.document_id ?? item.id };
+        setDocument(normalized);
+        localStorage.setItem("lastDocument", JSON.stringify(normalized));
+      },
+      onText: setSummaryText,
+      onStatus: setSummaryStatus,
+      onStreaming: setSummaryStreaming,
+      onProgress: setSummaryProgress,
+      onError: setError,
+      errorMessage: () => languageRef.current === "tr"
+        ? "Özet yüklenemedi. Lütfen tekrar deneyin."
+        : "The summary could not be loaded. Please try again.",
+    });
+    summarySessionRef.current = session;
 
     async function loadDocument() {
       try {
-        const item = await apiFetch<DocumentData>(
-          `/documents/${documentId}`,
-          { signal }
-        );
+        const item = await getDocument(documentId, { signal });
+        if (signal.aborted) return;
 
         const normalized = {
           ...item,
@@ -194,7 +229,7 @@ export default function DocumentWorkspace({
           JSON.stringify(normalized)
         );
 
-        setSummaryText(normalized.summary ?? "");
+        await session.restore(normalized);
 
         // Belge detayı hazır; ikincil quiz/flashcard koleksiyonları sayfanın
         // görünmesini bloke etmesin.
@@ -283,7 +318,7 @@ export default function DocumentWorkspace({
           );
         }
       } catch (cause) {
-        if (!isAbortError(cause)) {
+        if (!signal.aborted && !isAbortError(cause)) {
           setError(
             languageRef.current === "tr"
               ? "Veriler şu anda yüklenemiyor. Lütfen daha sonra tekrar deneyin."
@@ -299,7 +334,10 @@ export default function DocumentWorkspace({
 
     void loadDocument();
 
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      if (summarySessionRef.current === session) summarySessionRef.current = null;
+    };
   }, [
     documentId,
     initialFlashcardId,
@@ -478,167 +516,9 @@ export default function DocumentWorkspace({
       }
     }
   }
-  async function generateSummary() {
-  if (!document) return;
-
-  setSummaryStreaming(true);
-  setSummaryText("");
-  setError(null);
-
-  try {
-    const token = localStorage.getItem("access_token");
-
-    const response = await fetch(
-      `http://127.0.0.1:8000/documents/${documentId}/summary/stream`,
-      {
-        method: "GET",
-        headers: {
-          Accept: "text/event-stream",
-          ...(token
-            ? {
-                Authorization: `Bearer ${token}`,
-              }
-            : {}),
-        },
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(
-        language === "tr"
-          ? "Özet oluşturma isteği başarısız oldu."
-          : "Summary generation request failed."
-      );
-    }
-
-    if (!response.body) {
-      throw new Error(
-        language === "tr"
-          ? "Özet akışı başlatılamadı."
-          : "Summary stream could not be started."
-      );
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-
-    let buffer = "";
-    let streamedSummary = "";
-
-    while (true) {
-      const { value, done } = await reader.read();
-
-      if (done) break;
-
-      buffer += decoder.decode(value, {
-        stream: true,
-      });
-
-      const rawEvents = buffer.split("\n\n");
-      buffer = rawEvents.pop() ?? "";
-
-      for (const rawEvent of rawEvents) {
-        if (!rawEvent.trim()) continue;
-
-        let eventName = "";
-        let dataText = "";
-
-        for (const line of rawEvent.split("\n")) {
-          if (line.startsWith("event:")) {
-            eventName = line.slice(6).trim();
-          }
-
-          if (line.startsWith("data:")) {
-            dataText += line.slice(5).trim();
-          }
-        }
-
-        if (!dataText) continue;
-
-        let data: Record<string, unknown>;
-
-        try {
-          data = JSON.parse(dataText);
-        } catch {
-          continue;
-        }
-
-        if (eventName === "error") {
-          throw new Error(
-            typeof data.message === "string"
-              ? data.message
-              : language === "tr"
-              ? "Özet oluşturulurken hata oluştu."
-              : "An error occurred while creating the summary."
-          );
-        }
-
-        if (eventName === "done") {
-          continue;
-        }
-
-        const incomingText =
-          typeof data.text === "string"
-            ? data.text
-            : typeof data.content === "string"
-            ? data.content
-            : typeof data.token === "string"
-            ? data.token
-            : typeof data.chunk === "string"
-            ? data.chunk
-            : "";
-
-        if (!incomingText) continue;
-
-        streamedSummary += incomingText;
-        setSummaryText(streamedSummary);
-      }
-    }
-
-    const updatedDocument =
-      await apiFetch<DocumentData>(
-        `/documents/${documentId}`
-      );
-
-    const normalizedUpdatedDocument = {
-      ...updatedDocument,
-      document_id:
-        updatedDocument.document_id ??
-        updatedDocument.id,
-    };
-
-    setDocument(normalizedUpdatedDocument);
-
-    setSummaryText(
-      normalizedUpdatedDocument.summary ??
-        streamedSummary
-    );
-
-    localStorage.setItem(
-      "lastDocument",
-      JSON.stringify(
-        normalizedUpdatedDocument
-      )
-    );
-  } catch (cause) {
-    if (!isAbortError(cause)) {
-      console.error(
-        "Summary generation failed:",
-        cause
-      );
-
-      setError(
-        cause instanceof Error
-          ? cause.message
-          : language === "tr"
-          ? "Özet oluşturulamadı."
-          : "Summary could not be generated."
-      );
-    }
-  } finally {
-    setSummaryStreaming(false);
+  function generateSummary() {
+    summarySessionRef.current?.start();
   }
-}
 
   async function generateFlashcards() {
     if (!document) return;
@@ -855,6 +735,8 @@ export default function DocumentWorkspace({
         <SummaryNotebook
           summary={summaryText}
           streaming={summaryStreaming}
+          generationStatus={summaryStatus}
+          progress={summaryProgress}
           language={language}
           onGenerate={generateSummary}
         />

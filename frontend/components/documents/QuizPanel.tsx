@@ -1,9 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Button from "@/components/ui/Button";
 import {
   apiFetch,
+  ApiError,
+  API_URL,
+  getToken,
   type Quiz,
   type QuizQuestion,
 } from "@/lib/api";
@@ -104,6 +107,13 @@ export default function QuizPanel({
     total: 0,
   });
 
+  const generationRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => {
+    generationRef.current?.abort();
+    generationRef.current = null;
+  }, [documentId]);
+
   const currentQuestion =
     questions[currentQuestionIndex];
 
@@ -112,6 +122,11 @@ export default function QuizPanel({
   // =====================================================
 
   async function generateQuiz() {
+    if (generationRef.current) return;
+    const controller = new AbortController();
+    generationRef.current = controller;
+    let acceptedCount = 0;
+    const acceptedKeys = new Set<number | string>();
     setBusy(true);
 
     setError(null);
@@ -130,12 +145,20 @@ export default function QuizPanel({
     });
 
     try {
-      const token = localStorage.getItem("access_token");
+      const token = getToken();
+      const authMessage = tr
+        ? "Oturumunuz geçersiz veya süresi dolmuş. Lütfen yeniden giriş yapın."
+        : "Your session is invalid or has expired. Please sign in again.";
+      if (!token?.trim()) {
+        setError(authMessage);
+        return;
+      }
 
       const response = await fetch(
-        `http://127.0.0.1:8000/quizzes/generate/stream?document_id=${documentId}&question_count=${questionCount}&difficulty=medium`,
+        `${API_URL}/quizzes/generate/stream?document_id=${documentId}&question_count=${questionCount}&difficulty=medium`,
         {
           method: "GET",
+          signal: controller.signal,
           headers: {
             Accept: "text/event-stream",
             ...(token
@@ -147,6 +170,7 @@ export default function QuizPanel({
         }
       );
 
+      if (controller.signal.aborted) return;
       if (!response.ok) {
         let message = tr
           ? "Sınav oluşturma isteği başarısız oldu."
@@ -162,11 +186,14 @@ export default function QuizPanel({
           // JSON dönmezse varsayılan mesaj kalır.
         }
 
-        throw new Error(message);
+        if (controller.signal.aborted) return;
+        setError(response.status === 401 ? authMessage : message);
+        return;
       }
 
       if (!response.body) {
-        throw new Error(
+        throw new ApiError(
+          0,
           tr
             ? "Sınav akışı başlatılamadı."
             : "Quiz stream could not be started."
@@ -183,6 +210,7 @@ export default function QuizPanel({
       while (true) {
         const { value, done } = await reader.read();
 
+        if (controller.signal.aborted) return;
         if (done) {
           break;
         }
@@ -248,6 +276,12 @@ export default function QuizPanel({
             const question =
               possibleQuestion as unknown as QuizQuestion;
 
+            const key = typeof data.index === "number" ? data.index : question.id;
+            if (key != null && acceptedKeys.has(key)) continue;
+            if (key != null) acceptedKeys.add(key);
+            acceptedCount += 1;
+            setGenerationProgress({ completed: acceptedCount, total: questionCount });
+
             setQuestions((current) => {
               if (
                 question.id != null &&
@@ -284,10 +318,10 @@ export default function QuizPanel({
                 ? data.total
                 : questionCount;
 
-            setGenerationProgress({
-              completed,
+            setGenerationProgress((current) => ({
+              completed: Math.max(current.completed, completed),
               total,
-            });
+            }));
 
             continue;
           }
@@ -297,7 +331,8 @@ export default function QuizPanel({
           // =========================================
 
           if (eventName === "error") {
-            throw new Error(
+            throw new ApiError(
+              0,
               typeof data.message === "string"
                 ? data.message
                 : tr
@@ -361,8 +396,10 @@ export default function QuizPanel({
         }
       }
 
+      if (controller.signal.aborted) return;
       if (!created) {
-        throw new Error(
+        throw new ApiError(
+          0,
           tr
             ? "Sınav oluşturuldu ancak kaydedilen sınav alınamadı."
             : "The quiz was generated but could not be loaded."
@@ -389,10 +426,10 @@ export default function QuizPanel({
 
       onQuizCreated?.(created);
     } catch (cause) {
-      console.error(
-        "Quiz streaming error:",
-        cause
-      );
+      if (controller.signal.aborted) return;
+      if (!(cause instanceof ApiError)) {
+        console.error("Unexpected quiz streaming error:", cause);
+      }
 
       setQuiz(null);
       setQuestions([]);
@@ -405,7 +442,11 @@ export default function QuizPanel({
           : "Quiz could not be generated."
       );
     } finally {
-      setBusy(false);
+      if (generationRef.current === controller) {
+        generationRef.current = null;
+        setBusy(false);
+      }
+      controller.abort();
     }
   }
 
@@ -481,10 +522,9 @@ export default function QuizPanel({
 
       setResult(response);
     } catch (cause) {
-      console.error(
-        "Quiz submit error:",
-        cause
-      );
+      if (!(cause instanceof ApiError)) {
+        console.error("Unexpected quiz submit error:", cause);
+      }
 
       setError(
         cause instanceof Error

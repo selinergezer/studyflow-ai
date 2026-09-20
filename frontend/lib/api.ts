@@ -255,7 +255,7 @@ export async function apiFetch<T>(
   // GET REQUEST CACHE + DEDUPLICATION
   // =====================================================
 
-  if (method === "GET") {
+  if (method === "GET" && init.cache !== "no-store") {
     const cacheKey = `${token}:${path}`;
     const startedAt = performance.now();
 
@@ -407,7 +407,9 @@ export async function apiFetch<T>(
    * Veri değiştiren bir işlem yaptıysak
    * eski GET sonuçlarını kullanmayalım.
    */
-  getRequestCache.clear();
+  if (method !== "GET") {
+    getRequestCache.clear();
+  }
 
 if (response.status === 204) {
   logApiTiming(method, path, startedAt, "network", response.status);
@@ -444,6 +446,45 @@ export type DocumentData = {
   course_id: number;
   uploaded_at?: string;
 };
+
+export type SummaryGenerationStatus =
+  | "not_started"
+  | "generating"
+  | "completed"
+  | "failed";
+
+export type DocumentSummaryStatus = {
+  document_id: number;
+  status: SummaryGenerationStatus;
+  has_summary: boolean;
+  error?: string;
+};
+
+export function getDocumentSummaryStatus(
+  documentId: string | number,
+  signal?: AbortSignal,
+) {
+  return apiFetch<DocumentSummaryStatus>(
+    `/documents/${documentId}/summary/status`,
+    {
+      cache: "no-store",
+      signal,
+    },
+  );
+}
+
+export function getDocument(
+  documentId: string | number,
+  options: { fresh?: boolean; signal?: AbortSignal } = {},
+) {
+  return apiFetch<DocumentData>(
+    `/documents/${documentId}`,
+    {
+      cache: options.fresh ? "no-store" : "default",
+      signal: options.signal,
+    },
+  );
+}
 
 export type QuizQuestion = {
   id: number;
